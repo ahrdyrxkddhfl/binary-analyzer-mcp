@@ -1,0 +1,4 @@
+{
+    "symbols": ["printf", "socket", "connect", "strcpy", "system"],
+    "platform": "linux_x64"
+}

@@ -1,0 +1,4 @@
+{
+    "code_block": "void func(char *str) { char buf[64]; strcpy(buf, str); }",
+    "check_type": "buffer_overflow"
+}

@@ -1,0 +1,4 @@
+{
+    "protection": "NX enabled, PIE enabled, Canary enabled",
+    "target_vuln": "buffer overflow"
+}

@@ -1,0 +1,25 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+mcp_venv/
+.venv/
+venv/
+
+# Test / coverage
+.pytest_cache/
+coverage.xml
+htmlcov/
+
+# Environment files
+.env
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
