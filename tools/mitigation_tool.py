@@ -1,5 +1,3 @@
-from llm.ollama_client import ask_llm
-
 def get_exploit_mitigation_info(protection: str, target_vuln: str):
     if not protection or not target_vuln:
         return {
