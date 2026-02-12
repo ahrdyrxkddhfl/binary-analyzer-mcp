@@ -68,4 +68,4 @@ def mitigation(protection: str, target_vuln: str) -> dict:
 
 # 서버 실행
 if __name__ == "__main__":
-    mcp.run()
+    mcp.run(transport='stdio')
