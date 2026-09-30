@@ -28,7 +28,7 @@ def test_symbol_multi_category():
     cats = result["categories"]
     assert "network" in cats
     assert "execution" in cats
-    assert "memory" in cats
+    assert "dangerous_memory" in cats
 
 
 def test_symbol_invalid_input():

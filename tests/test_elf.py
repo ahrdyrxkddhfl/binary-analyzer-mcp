@@ -111,3 +111,46 @@ def test_scan_directory_idempotent(elf_dir, tmp_path):
     with open(out) as f:
         lines = [l for l in f if l.strip()]
     assert len(lines) == rows2
+
+
+def test_scan_directory_idempotent_path_variants(elf_dir, tmp_path):
+    """같은 디렉터리를 경로 표기만 바꿔 스캔해도 행 수가 늘지 않는다."""
+    d, _, _ = elf_dir
+    out = str(tmp_path / "results.jsonl")
+
+    r1 = scan_directory(d, out)
+    r2 = scan_directory(d + "/", out)          # 끝 슬래시
+    r3 = scan_directory(os.path.join(d, "."), out)  # ./
+
+    assert r1["metrics"]["total_rows"] == r2["metrics"]["total_rows"]
+    assert r2["metrics"]["total_rows"] == r3["metrics"]["total_rows"]
+
+
+def test_scan_directory_content_stable(elf_dir, tmp_path):
+    """두 번 스캔 시 파일 내용(줄 집합)까지 동일해야 한다."""
+    d, _, _ = elf_dir
+    out = str(tmp_path / "results.jsonl")
+
+    scan_directory(d, out)
+    with open(out) as f:
+        first = sorted(f.readlines())
+
+    scan_directory(d, out)
+    with open(out) as f:
+        second = sorted(f.readlines())
+
+    assert first == second
+
+
+def test_scan_directory_refuses_non_jsonl(elf_dir, tmp_path):
+    """기존 파일이 우리 JSONL 형식이 아니면 덮어쓰지 않는다."""
+    d, _, _ = elf_dir
+    victim = tmp_path / "important.txt"
+    victim.write_text("do not delete me\n")
+
+    result = scan_directory(d, str(victim))
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "UNSAFE_OUTPUT"
+    # 원본 보존 확인.
+    assert victim.read_text() == "do not delete me\n"

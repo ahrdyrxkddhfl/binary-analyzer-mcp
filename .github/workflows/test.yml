@@ -1,0 +1,23 @@
+name: tests
+
+# ubuntu 러너는 gcc 로 ELF 를 빌드할 수 있어, macOS 에서 skip 되던
+# analyze_elf/scan_directory 테스트까지 실제로 실행된다.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+      - name: Run tests
+        run: pytest -v

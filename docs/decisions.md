@@ -44,3 +44,55 @@
   않는 죽은 코드였다. 배포 서버에 Ollama 를 강제하면 환경이 깨진다.
 - 방식: 핵심 경로에서 import 하지 않는 선택 모듈로 명시하고 README 를
   실제 동작에 맞게 수정.
+
+## mitigation 파서 재작성 (문맥 훑기 → 토큰+부정 패턴)
+- 왜: "별칭 주변 8자 훑기" 방식이 checksec 출력("NX: NX disabled"),
+  구분자(:/=), 부정 표기(non-PIE, not enabled), 부분 문자열
+  (independent 안의 dep)에서 줄줄이 오판했다.
+- 방식: 보호기법마다 별칭을 단어 경계로 매칭하고, 별칭 근처의 명시적
+  부정 패턴(disabled/off/no/non/not)을 콤마 이전 구간에서만 확인.
+  회귀 테스트로 checksec 형식 케이스를 고정.
+
+## RELRO full/partial 가중치 분리
+- 왜: Partial RELRO 는 .got.plt 가 여전히 쓰기 가능한데 이전엔 Full 과
+  똑같이 +1 점을 줘서, 카나리 없는 기본 빌드가 High 로 나왔다.
+- 방식: relro_full=1, relro_partial=0 으로 config 에서 분리. Partial 은
+  이론 설명도 "완전히 막지는 못한다"로 정확히 기술.
+
+## NX 기본값을 checksec 기준으로
+- 왜: GNU_STACK 세그먼트가 없을 때 이전엔 NX 켜짐으로 봤으나,
+  checksec/pwntools 는 이 경우를 NX disabled 로 본다. "checksec 을
+  구현했다"는 설명과 모순이었다.
+- 방식: 세그먼트 없으면 disabled 로 판정.
+
+## PIE 판정을 DF_1_PIE 로
+- 왜: ET_DYN 만 보면 공유 라이브러리(.so)도 PIE 로 오판한다.
+- 방식: DT_FLAGS_1 의 DF_1_PIE 비트로 PIE 실행 파일과 .so 를 구분
+  (checksec 과 동일 기준).
+
+## 심볼 추출을 임포트 함수로 한정
+- 왜: 이전엔 .symtab 의 모든 심볼(파일명 Scrt1.o, 변수 _DYNAMIC,
+  로컬 심볼)을 다 모아 위험 함수 분류가 오염됐다.
+- 방식: STT_FUNC 이면서 SHN_UNDEF 인 심볼만 수집(= 외부에서 가져다
+  쓰는 함수).
+
+## 우선순위 카테고리에서 malloc/free 제외
+- 왜: memory 카테고리에 malloc/free 가 있고 high priority 라, 거의 모든
+  바이너리가 High 로 분류돼 우선순위가 무의미했다.
+- 방식: 오버플로우를 직접 유발하는 함수만 dangerous_memory 로 남김.
+
+## scan_directory 안전성/멱등성 강화
+- 왜: 출력 경로를 LLM 이 정하는데, JSONL 아닌 기존 파일을 넘기면 전체를
+  덮어써 데이터가 파괴됐다. 경로 문자열을 그대로 키로 써서 b/./b/절대
+  경로가 다른 행으로 쌓였고, open("w") 로 먼저 비워 쓰다 죽으면 결과가
+  통째로 날아갔다.
+- 방식: (1) realpath 를 기본키로 → 경로 표기 무관 멱등. (2) 기존 파일이
+  우리 JSONL 형식이 아니면 UNSAFE_OUTPUT 으로 거부. (3) 임시 파일 +
+  os.replace 로 원자적 쓰기. (4) 스캔 디렉터리 아래 사라진 파일의
+  stale row 제거. 내용까지 비교하는 멱등성 테스트 추가.
+
+## risky 탐지에서 문자열 리터럴 처리
+- 왜: 주석만 지우고 문자열 리터럴은 남겨, puts("...strcpy...") 안의
+  이름을 실제 호출로 오탐하는 문제가 있었다(회귀).
+- 방식: 상태 기계로 주석과 문자열/문자 리터럴을 함께 공백 치환한 뒤
+  호출을 검사.

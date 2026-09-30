@@ -1,0 +1,10 @@
+venv/
+.venv/
+mcp_venv/
+.git/
+__pycache__/
+*.pyc
+.pytest_cache/
+scan_results.jsonl
+*.tmp
+.DS_Store

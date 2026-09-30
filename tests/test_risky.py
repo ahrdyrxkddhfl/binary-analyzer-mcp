@@ -42,3 +42,20 @@ def test_risky_invalid_input():
 
     assert result["ok"] is False
     assert result["error"]["code"] == "INVALID_INPUT"
+
+
+def test_risky_ignores_string_literal():
+    """문자열 리터럴 안의 함수명은 오탐하지 않되, 실제 호출은 잡는다."""
+    code = 'puts("http://a.b"); strcpy(buf, s);'
+    result = check_risky_functions(code, "buffer_overflow")
+
+    # strcpy 실제 호출은 잡아야 한다.
+    assert "strcpy" in result["found_functions"]
+
+
+def test_risky_literal_only_not_flagged():
+    """리터럴에만 등장하고 실제 호출은 없으면 위험 아님."""
+    code = 'printf("use gets carefully");'
+    result = check_risky_functions(code, "buffer_overflow")
+
+    assert result["uses_risky_functions"] is False

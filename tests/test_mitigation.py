@@ -45,3 +45,37 @@ def test_mitigation_invalid_input():
 
     assert result["ok"] is False
     assert result["error"]["code"] == "INVALID_INPUT"
+
+
+def test_mitigation_checksec_all_disabled():
+    """checksec 형식으로 전부 꺼진 문자열은 Low (회귀 방지)."""
+    text = "Stack: No canary found, NX: NX disabled, PIE: No PIE, RELRO: No RELRO"
+    result = get_exploit_mitigation_info(text, "buffer overflow")
+
+    assert result["enabled_protections"] == []
+    assert result["difficulty"] == "Low"
+
+
+def test_mitigation_negation_forms():
+    """다양한 부정 표기를 모두 꺼짐으로 판정한다."""
+    for text in ["NX: disabled", "NX=off", "NX not enabled", "non-PIE"]:
+        result = get_exploit_mitigation_info(text, "bof")
+        assert result["enabled_protections"] == [], text
+
+
+def test_mitigation_no_substring_false_match():
+    """'position independent' 안의 'dep' 를 nx 로 오판하지 않는다."""
+    result = get_exploit_mitigation_info("PIE: position independent", "bof")
+
+    assert "nx" not in result["enabled_protections"]
+    assert "pie" in result["enabled_protections"]
+
+
+def test_mitigation_partial_relro_not_counted():
+    """Partial RELRO 는 점수에 넣지 않는다(.got.plt 여전히 쓰기 가능)."""
+    full = get_exploit_mitigation_info("Full RELRO", "bof")
+    partial = get_exploit_mitigation_info("Partial RELRO", "bof")
+
+    assert "relro:full" in full["enabled_protections"]
+    assert "relro:partial" in partial["enabled_protections"]
+    assert full["score"] > partial["score"]
