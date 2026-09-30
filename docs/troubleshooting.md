@@ -158,6 +158,9 @@ M-2 를 고친 뒤 RELRO 수준 판정에서 연쇄적으로 문제가 나왔다
   로 분리했다. `elf_tool` 은 이 함수를 직접 호출한다. 텍스트 파서는 사람이나
   LLM 이 문자열을 넣는 `mitigation` 도구에서만 쓰며, 파싱 결과도 같은 순수
   함수에 넘긴다. 이제 핵심 경로에서 파서 버그가 구조적으로 발생할 수 없다.
+  이어서 응답 딕셔너리(`analysis` 문구 포함)를 두 경로가 각자 조립하던
+  중복도 `build_mitigation_result` 한 곳으로 모았다. 한쪽만 수정돼 두 도구의
+  출력이 어긋나는 일을 막기 위해서다.
 - **검증**: `test_score_protections_pure_function`,
   `test_text_parser_matches_pure_function`, `test_analyze_elf_norelro_is_none`
 
@@ -280,7 +283,9 @@ M-2 를 고친 뒤 RELRO 수준 판정에서 연쇄적으로 문제가 나왔다
 - **해결**: 경로를 `surrogateescape → backslashreplace` 로 변환해 표시용
   문자열(`bad\xffname`)로 만든다. 파일 하나에서 예외가 나도 스캔이 계속되도록
   파일 단위로 예외를 격리했다.
-- **검증**: `test_scan_survives_non_utf8_filename`
+- **검증**: `test_scan_survives_non_utf8_filename`. 처음 작성한 테스트는
+  "죽지 않았는지"와 결과가 1행 이상인지만 확인했다. 지금은 해당 파일이 실제로
+  적재돼 `scanned` 가 1 늘었는지, 결과 행 수가 `scanned` 와 같은지까지 검사한다.
 
 ---
 
@@ -322,6 +327,7 @@ M-2 를 고친 뒤 RELRO 수준 판정에서 연쇄적으로 문제가 나왔다
 | `strcpy` 수정법으로 `strncpy` 를 권장했으나 NUL 종료를 보장하지 않고, `strlcpy` 는 glibc 2.38 미만에 없음 | 권장 문구 수정 |
 | `is_vulnerable` 이 "위험 함수 사용"보다 과한 표현 | `uses_risky_functions` 추가(기존 키는 호환용으로 유지) |
 | 커밋 작성자 이메일 오타(`gmail..com`)로 GitHub 계정에 커밋이 연결되지 않음 | 작성자 정보 수정 |
+| MCP 서버 stderr 에 같은 로그가 두 번씩 찍힘. 모듈 로거의 핸들러와, root 로거로 전파된 뒤 MCP 쪽 핸들러가 각각 출력 | `logger.propagate = False` (프로토콜은 stdout 을 쓰므로 기능 영향은 없었음) |
 
 ---
 
