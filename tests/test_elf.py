@@ -24,8 +24,21 @@ _VULN_C = (
 )
 
 
+def _is_elf(path: str) -> bool:
+    """산출물이 실제 ELF 인지 매직넘버로 확인한다.
+
+    macOS 에서는 gcc 가 clang 별칭이라 존재하더라도 Mach-O 를 만들어
+    ELF 테스트가 의미 없다. 이 검사로 ELF 가 아니면 fixture 가 skip 된다.
+    """
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) == b"\x7fELF"
+    except OSError:
+        return False
+
+
 def _compile(src: str, flags: list, out: str) -> bool:
-    """C 소스를 주어진 플래그로 컴파일한다. 성공하면 True."""
+    """C 소스를 주어진 플래그로 컴파일한다. ELF 산출 시에만 True."""
     src_path = out + ".c"
     with open(src_path, "w") as f:
         f.write(src)
@@ -33,7 +46,7 @@ def _compile(src: str, flags: list, out: str) -> bool:
         ["gcc", *flags, src_path, "-o", out],
         capture_output=True,
     )
-    return proc.returncode == 0 and os.path.isfile(out)
+    return proc.returncode == 0 and os.path.isfile(out) and _is_elf(out)
 
 
 @pytest.fixture
@@ -154,3 +167,94 @@ def test_scan_directory_refuses_non_jsonl(elf_dir, tmp_path):
     assert result["error"]["code"] == "UNSAFE_OUTPUT"
     # 원본 보존 확인.
     assert victim.read_text() == "do not delete me\n"
+
+
+def test_analyze_elf_no_protection_relro_consistent(elf_dir):
+    """protections.relro 와 mitigation 의 relro 판단이 일치해야 한다."""
+    _, _, off = elf_dir
+    result = analyze_elf(off)
+
+    relro_field = result["protections"]["relro"]  # "NONE"/"PARTIAL"/"FULL"
+    enabled = result["mitigation_analysis"]["enabled_protections"]
+    relro_in_mit = [x for x in enabled if "relro" in x]
+
+    if relro_field == "NONE":
+        assert relro_in_mit == []
+    elif relro_field == "PARTIAL":
+        assert relro_in_mit == ["relro:partial"]
+    else:
+        assert relro_in_mit == ["relro:full"]
+
+
+@pytest.fixture
+def nested_dir(tmp_path):
+    """하위 디렉터리와 .so 를 포함한 트리."""
+    if not shutil.which("gcc"):
+        pytest.skip("gcc not available")
+    d = str(tmp_path)
+    sub = os.path.join(d, "sub")
+    os.makedirs(sub, exist_ok=True)
+    ok = True
+    ok &= _compile(_SAFE_C, [], os.path.join(d, "a1"))
+    ok &= _compile(_SAFE_C, [], os.path.join(d, "a2"))
+    ok &= _compile(_SAFE_C, [], os.path.join(sub, "inner"))
+    # .so 하나.
+    so_src = os.path.join(d, "lib.c")
+    with open(so_src, "w") as f:
+        f.write("int f(){return 0;}")
+    so_ok = subprocess.run(
+        ["gcc", "-shared", "-fPIC", so_src, "-o", os.path.join(d, "a3.so")],
+        capture_output=True,
+    ).returncode == 0 and _is_elf(os.path.join(d, "a3.so"))
+    if not (ok and so_ok):
+        pytest.skip("gcc could not build nested ELF test tree")
+    return d
+
+
+def test_scan_does_not_delete_other_scans(nested_dir, tmp_path):
+    """다른 디렉터리/패턴으로 적재한 행을 stale 로 오삭제하지 않는다(회귀)."""
+    d = nested_dir
+    out = str(tmp_path / "results.jsonl")
+
+    r_sub = scan_directory(os.path.join(d, "sub"), out)
+    assert r_sub["metrics"]["total_rows"] == 1  # sub/inner
+
+    r_all = scan_directory(d, out)
+    # sub/inner(1) + a1,a2,a3.so(3) = 4. sub/inner 가 지워지면 안 된다.
+    assert r_all["metrics"]["total_rows"] == 4
+
+    r_so = scan_directory(d, out, "*.so")
+    # *.so 스캔이 기존 4개를 지우면 안 된다. a3.so 는 이미 있으므로 4 유지.
+    assert r_so["metrics"]["total_rows"] == 4
+
+
+def test_scan_shared_object_not_pie(nested_dir, tmp_path):
+    """.so 는 PIE 로 잡히지 않는다."""
+    from tools.elf_tool import analyze_elf as ae
+    so = os.path.join(nested_dir, "a3.so")
+    result = ae(so)
+    assert result["protections"]["pie"] is False
+
+
+def test_scan_skips_object_files(nested_dir, tmp_path):
+    """.o(ET_REL) 파일은 skip 되어 결과에 들어가지 않는다."""
+    o_path = os.path.join(nested_dir, "obj.o")
+    subprocess.run(
+        ["gcc", "-c", os.path.join(nested_dir, "lib.c"), "-o", o_path],
+        capture_output=True,
+    )
+    if not os.path.isfile(o_path):
+        pytest.skip("could not build .o")
+    out = str(tmp_path / "r.jsonl")
+    result = scan_directory(nested_dir, out, "*.o")
+    assert result["metrics"]["scanned"] == 0
+    assert result["metrics"]["skipped_non_elf"] >= 1
+
+
+def test_load_existing_survives_non_dict_line(tmp_path):
+    """JSONL 에 dict 아닌 줄([1])이 있어도 크래시하지 않는다(회귀)."""
+    from tools.batch_tool import _load_existing
+    p = tmp_path / "mixed.jsonl"
+    p.write_text('{"path":"/x"}\n[1]\n{"path":"/y"}\n')
+    records = _load_existing(str(p))
+    assert "/x" in records and "/y" in records

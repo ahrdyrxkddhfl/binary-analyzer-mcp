@@ -59,3 +59,17 @@ def test_risky_literal_only_not_flagged():
     result = check_risky_functions(code, "buffer_overflow")
 
     assert result["uses_risky_functions"] is False
+
+
+def test_risky_unterminated_quote_recovers():
+    """닫히지 않은 따옴표 다음 줄의 실제 호출을 놓치지 않는다(회귀)."""
+    code = 'puts("abc);\nstrcpy(a, b);'
+    result = check_risky_functions(code, "buffer_overflow")
+    assert "strcpy" in result["found_functions"]
+
+
+def test_risky_digit_separator_quote():
+    """C23 자릿수 구분자('의 홑따옴표) 이후 호출도 잡는다."""
+    code = "int x = 1'000; strcpy(a, b);"
+    result = check_risky_functions(code, "buffer_overflow")
+    assert "strcpy" in result["found_functions"]

@@ -79,3 +79,34 @@ def test_mitigation_partial_relro_not_counted():
     assert "relro:full" in full["enabled_protections"]
     assert "relro:partial" in partial["enabled_protections"]
     assert full["score"] > partial["score"]
+
+
+def test_mitigation_relro_none_not_partial():
+    """'RELRO none' 은 partial 이 아니라 아예 없는 것으로 본다(회귀)."""
+    result = get_exploit_mitigation_info(
+        "NX enabled, PIE enabled, No canary, RELRO none", "bof"
+    )
+    relro = [x for x in result["enabled_protections"] if "relro" in x]
+    assert relro == []
+
+
+def test_mitigation_relro_disabled_forms():
+    """RELRO: disabled / RELRO off 도 none 으로 판정."""
+    for text in ["RELRO: disabled", "RELRO off"]:
+        result = get_exploit_mitigation_info(text, "bof")
+        relro = [x for x in result["enabled_protections"] if "relro" in x]
+        assert relro == [], text
+
+
+def test_mitigation_full_scoped_to_relro():
+    """다른 항목의 'full' 이 RELRO 로 새지 않는다."""
+    result = get_exploit_mitigation_info("Canary: full, RELRO: partial", "bof")
+    relro = [x for x in result["enabled_protections"] if "relro" in x]
+    assert relro == ["relro:partial"]
+
+
+def test_mitigation_newline_separator():
+    """줄바꿈으로 구분된 여러 줄에서 다음 줄 상태가 새지 않는다."""
+    result = get_exploit_mitigation_info("NX enabled\nPIE: No PIE", "bof")
+    assert "nx" in result["enabled_protections"]
+    assert "pie" not in result["enabled_protections"]
