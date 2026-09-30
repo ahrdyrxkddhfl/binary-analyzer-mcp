@@ -16,7 +16,6 @@ from elftools.elf.elffile import ELFFile
 from elftools.elf.sections import SymbolTableSection
 from elftools.elf.dynamic import DynamicSection
 
-from config_loader import load_config
 from common import make_error, get_logger
 from tools.symbol_tool import analyze_symbol_table
 from tools.mitigation_tool import get_exploit_mitigation_info
@@ -30,17 +29,19 @@ _PF_X = 0x1
 
 
 def _read_imported_symbols(elf: ELFFile) -> list:
-    """ELF 에서 참조된 함수 심볼 이름을 뽑는다.
+    """ELF 가 외부에서 가져다 쓰는(import) 함수 심볼 이름을 뽑는다.
 
-    동적 심볼 테이블(.dynsym)과 일반 심볼 테이블(.symtab)을 모두 훑어
-    함수 심볼 이름을 모은다. 버전 접미사(printf@GLIBC_2.2.5)는 떼어
-    순수 이름만 남긴다.
+    함수 타입(STT_FUNC)이면서 정의부가 이 바이너리에 없는(SHN_UNDEF)
+    심볼만 모은다. 이게 "이 바이너리가 호출하는 외부 함수"에 해당한다.
+    이 필터가 없으면 파일명(Scrt1.o), 내부 변수(_DYNAMIC), 로컬 심볼
+    까지 섞여 들어와 위험 함수 분류가 오염된다. 버전 접미사
+    (printf@GLIBC_2.2.5)는 떼어 순수 이름만 남긴다.
 
     Args:
         elf: 열린 ELFFile 객체.
 
     Returns:
-        중복 제거된 함수 심볼 이름 리스트.
+        중복 제거된 임포트 함수 이름 리스트.
     """
     names = set()
     for section in elf.iter_sections():
@@ -50,9 +51,14 @@ def _read_imported_symbols(elf: ELFFile) -> list:
             name = symbol.name
             if not name:
                 continue
-            # printf@GLIBC_2.2.5 -> printf
-            name = name.split("@")[0]
-            names.add(name)
+            info = symbol["st_info"]
+            # 함수 타입만.
+            if info["type"] != "STT_FUNC":
+                continue
+            # 정의부가 이 바이너리에 없는(외부에서 가져오는) 것만.
+            if symbol["st_shndx"] != "SHN_UNDEF":
+                continue
+            names.add(name.split("@")[0])
     return sorted(names)
 
 
@@ -60,21 +66,43 @@ def _detect_nx(elf: ELFFile) -> bool:
     """NX(스택 실행 방지) 활성 여부.
 
     GNU_STACK 세그먼트에 실행 권한 플래그가 없으면 NX 가 켜진 것이다.
-    세그먼트 자체가 없으면 커널 기본값을 따르므로 켜진 것으로 본다.
+    세그먼트가 아예 없으면 checksec/pwntools 는 NX disabled 로
+    판정하므로 여기서도 그 관례를 따른다(스택 실행 가능으로 간주).
+
+    Returns:
+        NX 가 켜져 있으면 True.
     """
     for seg in elf.iter_segments():
         if seg["p_type"] == "PT_GNU_STACK":
             return not bool(seg["p_flags"] & _PF_X)
-    return True
+    return False
 
 
 def _detect_pie(elf: ELFFile) -> bool:
     """PIE(위치 독립 실행) 활성 여부.
 
-    ELF 타입이 ET_DYN 이면서 실행 파일이면 PIE 다. 공유 라이브러리도
-    ET_DYN 이지만 여기서는 실행 파일 분석을 전제로 한다.
+    ET_DYN 은 PIE 실행 파일과 공유 라이브러리(.so)가 공유하는 타입
+    이라, ET_DYN 만으로 PIE 라 하면 .so 까지 PIE 로 오판한다. 진짜 PIE
+    실행 파일은 동적 플래그 DT_FLAGS_1 에 DF_1_PIE 비트가 있다.
+    checksec 도 이 비트로 PIE 실행 파일과 .so 를 구분한다. ET_EXEC 는
+    비-PIE, ET_DYN + DF_1_PIE 는 PIE, 그 외 ET_DYN 은 .so 로 본다.
+
+    Returns:
+        PIE 실행 파일이면 True.
     """
-    return elf.header["e_type"] == "ET_DYN"
+    if elf.header["e_type"] != "ET_DYN":
+        return False
+
+    _DF_1_PIE = 0x08000000  # DT_FLAGS_1 의 DF_1_PIE 비트(ELF 스펙 고정값).
+    for section in elf.iter_sections():
+        if isinstance(section, DynamicSection):
+            for tag in section.iter_tags():
+                if tag.entry.d_tag == "DT_FLAGS_1" and (
+                    tag.entry.d_val & _DF_1_PIE
+                ):
+                    return True
+    # ET_DYN 인데 DF_1_PIE 표시가 없으면 공유 라이브러리로 간주.
+    return False
 
 
 def _detect_canary(elf: ELFFile) -> bool:
