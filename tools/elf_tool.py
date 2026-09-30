@@ -82,10 +82,13 @@ def _detect_pie(elf: ELFFile) -> bool:
     """PIE(위치 독립 실행) 활성 여부.
 
     ET_DYN 은 PIE 실행 파일과 공유 라이브러리(.so)가 공유하는 타입
-    이라, ET_DYN 만으로 PIE 라 하면 .so 까지 PIE 로 오판한다. 진짜 PIE
-    실행 파일은 동적 플래그 DT_FLAGS_1 에 DF_1_PIE 비트가 있다.
-    checksec 도 이 비트로 PIE 실행 파일과 .so 를 구분한다. ET_EXEC 는
-    비-PIE, ET_DYN + DF_1_PIE 는 PIE, 그 외 ET_DYN 은 .so 로 본다.
+    이라, ET_DYN 만으로 PIE 라 하면 .so 까지 PIE 로 오판한다. 두 신호로
+    구분한다: (1) 동적 플래그 DT_FLAGS_1 의 DF_1_PIE 비트, (2) 프로그램
+    인터프리터 세그먼트 PT_INTERP 존재. PIE 실행 파일은 동적 링커로
+    실행되므로 PT_INTERP 를 갖지만 .so 는 갖지 않는다. DF_1_PIE 는
+    비교적 최근 binutils 부터 설정되므로, 오래된 툴체인으로 빌드한
+    PIE 를 놓치지 않도록 PT_INTERP 를 함께 본다. (checksec.sh 는
+    전통적으로 DT_DEBUG 유무로 판별한다.)
 
     Returns:
         PIE 실행 파일이면 True.
@@ -101,7 +104,13 @@ def _detect_pie(elf: ELFFile) -> bool:
                     tag.entry.d_val & _DF_1_PIE
                 ):
                     return True
-    # ET_DYN 인데 DF_1_PIE 표시가 없으면 공유 라이브러리로 간주.
+
+    # PT_INTERP 가 있으면 동적 링커로 실행되는 실행 파일 = PIE.
+    # (.so 는 PT_INTERP 가 없다.)
+    for seg in elf.iter_segments():
+        if seg["p_type"] == "PT_INTERP":
+            return True
+
     return False
 
 
@@ -176,6 +185,16 @@ def analyze_elf(path: str) -> dict:
                 )
             f.seek(0)
             elf = ELFFile(f)
+
+            # 재배치 가능 오브젝트(.o, ET_REL)는 실행 파일/라이브러리가
+            # 아니라 보호기법 개념이 적용되지 않는다. 분석 대상에서
+            # 제외한다(배치 스캔에서 skip 으로 집계).
+            if elf.header["e_type"] == "ET_REL":
+                return make_error(
+                    code="NOT_ELF",
+                    message="relocatable object (.o) is not an executable/library",
+                    hint="Provide a linked executable or shared object",
+                )
 
             symbols = _read_imported_symbols(elf)
             nx = _detect_nx(elf)
