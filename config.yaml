@@ -1,0 +1,82 @@
+# =============================================================
+# binary-analyzer-mcp 설정 파일
+#
+# 사람이 판단해 고른 값(위험 함수 목록, 카테고리 분류, 난이도
+# 가중치)을 코드에서 분리해 둔다. 룰을 바꾸고 싶을 때 코드가 아니라
+# 이 파일만 고치면 되고, 비교 실험 시 두 경로가 같은 룰을 쓰도록
+# 강제하는 단일 소스 역할을 한다.
+# =============================================================
+
+# -------------------------------------------------------------
+# 위험 함수 사전
+# check_risky 가 코드 블록에서 찾는 대상. key = 함수명,
+# value.reason = 왜 위험한지, value.fix = 권장 대체 함수.
+# 항목을 추가/삭제하면 탐지 범위가 그대로 넓어지거나 좁아진다.
+# -------------------------------------------------------------
+dangerous_functions:
+  gets:
+    reason: "입력 길이 제한이 전혀 없어 스택 버퍼 오버플로우가 항상 가능하다."
+    fix: "fgets(buf, sizeof(buf), stdin) 사용."
+    severity: high
+  strcpy:
+    reason: "목적지 버퍼 크기를 확인하지 않아 오버플로우가 발생할 수 있다."
+    fix: "strncpy 또는 strlcpy로 길이를 제한한다."
+    severity: high
+  strcat:
+    reason: "목적지 남은 공간을 확인하지 않고 이어 붙여 오버플로우가 발생할 수 있다."
+    fix: "strncat 또는 strlcat 사용."
+    severity: high
+  sprintf:
+    reason: "출력 길이를 제한하지 않아 목적지 버퍼를 넘길 수 있다."
+    fix: "snprintf(buf, sizeof(buf), ...) 사용."
+    severity: high
+  scanf:
+    reason: "%s 등에 폭(width) 지정 없이 쓰면 입력 길이를 제한하지 못한다."
+    fix: '%63s 처럼 폭을 지정하거나 fgets 후 파싱한다.'
+    severity: medium
+  memcpy:
+    reason: "복사 길이가 목적지 크기를 넘으면 오버플로우가 발생한다(길이 계산 실수에 취약)."
+    fix: "복사 전 목적지 크기와 길이를 검증한다."
+    severity: medium
+  system:
+    reason: "외부 입력이 인자로 들어가면 명령어 주입(command injection)이 가능하다."
+    fix: "execve 계열로 인자를 분리해 전달하거나 입력을 화이트리스트 검증한다."
+    severity: high
+
+# -------------------------------------------------------------
+# 심볼 카테고리 분류
+# analyze_symbol 이 함수 목록을 기능별로 묶을 때 쓰는 사전.
+# 한 심볼이 여러 카테고리에 속할 수 있으므로 결과도 카테고리별로
+# 나눠 담는다.
+# -------------------------------------------------------------
+symbol_categories:
+  network: [socket, connect, accept, recv, send, bind, listen]
+  execution: [system, execve, execl, execlp, popen, fork]
+  file: [open, read, write, fopen, fread, fwrite, unlink]
+  memory: [strcpy, strcat, sprintf, gets, scanf, memcpy, malloc, free]
+
+# 위 카테고리 중 익스플로잇/악성 행위와 직접 연결되어 우선 분석해야
+# 하는 카테고리. 여기 속한 심볼이 하나라도 있으면 분석 우선순위를
+# High 로 올린다. 목록을 늘리면 더 많은 경우가 High 로 분류된다.
+high_priority_categories: [execution, memory]
+
+# -------------------------------------------------------------
+# 익스플로잇 난이도 점수
+# mitigation 이 보호기법 조합을 난이도로 환산할 때 쓰는 가중치.
+# 각 보호기법이 "켜져" 있으면 아래 점수만큼 난이도가 올라간다.
+# 값을 키우면 그 보호기법을 더 결정적으로 취급한다.
+# -------------------------------------------------------------
+mitigation_weights:
+  nx: 1        # 데이터 영역 실행 차단 → 셸코드 직접 실행 불가(ROP 필요)
+  canary: 1    # 스택 카나리 → 스택 오버플로우로 저장된 RET 덮기 어려움
+  pie: 1       # 위치 독립 실행 → 주소 예측 불가(정보 유출 선행 필요)
+  relro: 1     # GOT 보호 → GOT 덮어쓰기 공격 차단
+
+# 난이도 점수 구간. 켜진 보호기법 점수 합계가
+#   high_min 이상  → High
+#   medium_min 이상 → Medium
+#   그 미만        → Low
+# 구간을 좁히면 같은 보호기법 수에도 더 쉽게 High 로 판정된다.
+difficulty_thresholds:
+  medium_min: 1
+  high_min: 3
