@@ -38,8 +38,10 @@ def analyze_symbol_table(symbols, platform: str = "linux_x64") -> dict:
     category_map = config["symbol_categories"]
     high_priority = set(config["high_priority_categories"])
 
-    # 심볼을 set 으로 바꿔 조회를 O(1) 로 만든다.
-    symbol_set = set(symbols)
+    # 심볼을 set 으로 바꿔 조회를 O(1) 로 만든다. 문자열이 아닌 원소
+    # (중첩 리스트 등)가 섞이면 set() 이 TypeError 를 내므로, 해시
+    # 가능한 문자열만 남긴다.
+    symbol_set = {s for s in symbols if isinstance(s, str)}
 
     categories = {}
     critical_functions = []

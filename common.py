@@ -54,5 +54,10 @@ def get_logger(name: str) -> logging.Logger:
         handler.setFormatter(fmt)
         logger.addHandler(handler)
     level = os.environ.get("LOG_LEVEL", "INFO").upper()
+    # 잘못된 레벨 값이 들어와도 서버가 죽지 않도록 유효한 값만 허용하고,
+    # 그 외에는 INFO 로 폴백한다.
+    _VALID = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+    if level not in _VALID:
+        level = "INFO"
     logger.setLevel(level)
     return logger
