@@ -110,3 +110,41 @@ def test_mitigation_newline_separator():
     result = get_exploit_mitigation_info("NX enabled\nPIE: No PIE", "bof")
     assert "nx" in result["enabled_protections"]
     assert "pie" not in result["enabled_protections"]
+
+
+def test_mitigation_no_separator_relro():
+    """구분자 없는 입력에서도 RELRO 와 NX 상태가 뒤섞이지 않는다."""
+    result = get_exploit_mitigation_info(
+        "NX disabled PIE enabled Full RELRO", "bof"
+    )
+    enabled = result["enabled_protections"]
+    assert "nx" not in enabled
+    assert "pie" in enabled
+    assert "relro:full" in enabled
+
+
+def test_score_protections_pure_function():
+    """score_protections 는 문자열 파싱 없이 구조화된 값으로 계산한다."""
+    from tools.mitigation_tool import score_protections
+    high = score_protections(nx=True, pie=True, canary=True, relro="full")
+    assert high["difficulty"] == "High"
+    assert "relro:full" in high["enabled_protections"]
+
+    low = score_protections(nx=False, pie=False, canary=False, relro="none")
+    assert low["difficulty"] == "Low"
+    assert low["enabled_protections"] == []
+
+    # partial RELRO 는 점수 0.
+    partial = score_protections(nx=False, pie=False, canary=False, relro="partial")
+    assert partial["score"] == 0
+
+
+def test_text_parser_matches_pure_function():
+    """텍스트 파서 결과가 순수 함수 결과와 일치한다(왕복 무손실)."""
+    from tools.mitigation_tool import score_protections
+    parsed = get_exploit_mitigation_info(
+        "NX enabled, PIE enabled, No canary, Full RELRO", "bof"
+    )
+    direct = score_protections(nx=True, pie=True, canary=False, relro="full")
+    assert parsed["enabled_protections"] == direct["enabled_protections"]
+    assert parsed["difficulty"] == direct["difficulty"]

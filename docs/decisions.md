@@ -65,13 +65,16 @@
   구현했다"는 설명과 모순이었다.
 - 방식: 세그먼트 없으면 disabled 로 판정.
 
-## PIE 판정을 DF_1_PIE + PT_INTERP 로
+## PIE 판정을 DF_1_PIE + (PT_INTERP and not DT_SONAME) 로
 - 왜: ET_DYN 만 보면 공유 라이브러리(.so)도 PIE 로 오판한다.
-- 방식: DT_FLAGS_1 의 DF_1_PIE 비트 또는 PT_INTERP 세그먼트 존재로
-  PIE 실행 파일과 .so 를 구분한다. DF_1_PIE 는 비교적 최근 binutils
-  부터 설정되므로, 오래된 툴체인 PIE 를 놓치지 않도록 PT_INTERP 를
-  함께 본다(.so 는 PT_INTERP 가 없다). 참고로 checksec.sh 는 전통적
-  으로 DT_DEBUG 유무로 판별한다.
+- 방식: DT_FLAGS_1 의 DF_1_PIE 비트가 있으면 PIE. 없더라도 PT_INTERP
+  세그먼트가 있으면서 DT_SONAME 이 없으면 PIE 실행 파일로 본다.
+  PT_INTERP 만으로는 부족하다 — libc.so.6 처럼 직접 실행되는 공유
+  라이브러리도 PT_INTERP 를 갖기 때문이다. 다만 공유 라이브러리는
+  거의 항상 DT_SONAME(라이브러리 이름)을 갖고 PIE 실행 파일은 갖지
+  않으므로 이걸로 구분한다. DF_1_PIE 는 비교적 최근 binutils 부터
+  설정되므로 이 조합을 함께 쓴다. (checksec.sh 는 전통적으로 DT_DEBUG
+  유무로 판별한다.)
 
 ## 심볼 추출을 임포트 함수로 한정
 - 왜: 이전엔 .symtab 의 모든 심볼(파일명 Scrt1.o, 변수 _DYNAMIC,
@@ -120,3 +123,36 @@
 - 원자적 쓰기 보완: output_path 가 심링크면 대상 실제 경로에 쓰고,
   기존 파일 권한을 보존(mkstemp 기본 0600 으로 바뀌지 않게).
 - .o(ET_REL) 재배치 오브젝트는 분석 대상에서 skip.
+
+## 3차 리뷰 대응 (정밀 수정)
+- PIE 판정에 DT_SONAME 조건 추가: PT_INTERP 만 보면 libc.so.6 같은
+  실행 가능 공유 라이브러리를 PIE 로 오판. DT_SONAME 이 없을 때만
+  PT_INTERP 를 PIE 신호로 인정.
+- RELRO 판정 창 축소: 구분자 없는 입력("NX disabled ... Full RELRO")
+  에서 구간이 문자열 전체가 되어 다른 항목의 부정어를 가져오던 문제.
+  별칭 앞 8자/뒤 16자 창과 구분자 구간의 교집합만 본다.
+- stale 판정에서 dotfile 오삭제 수정: 삭제된 파일은 glob 결과에 없어
+  candidate 집합만으로는 지울 수 없으므로, 직속 여부 + fnmatch(pattern)
+  으로 다시 판정하되 glob 의 dotfile 규칙을 그대로 따른다(pattern 이
+  '.' 로 시작하지 않으면 dotfile 을 제외). 이렇게 해야 '.*' 로 적재한
+  dotfile 행이 '*' 스캔에 지워지지 않으면서, 삭제된 파일의 행은 정상
+  제거된다.
+- 와이드/유니코드 문자 리터럴(L'x' 등) 미탐 수정: 자릿수 구분자 판정
+  조건을 "앞 글자가 숫자"로 좁혀 L/u/U 접두 리터럴을 정상 인식.
+- .o 에러 코드를 UNSUPPORTED_ELF_TYPE 로 정정(.o 도 ELF 이므로
+  NOT_ELF 는 부정확). batch 의 skip 집합에 추가.
+
+## 4차 리뷰 대응 (구조 개선 + 견고성)
+- 구조화된 값 직접 전달(가장 큰 개선): elf_tool 은 이미 nx/pie/canary/
+  relro 의 정확한 값을 아는데, 문자열로 조립했다가 자연어 파서로 다시
+  파싱하는 왕복 구조였다. RELRO NONE→partial 등 파서를 여러 번 고친
+  근본 원인이 이 왕복이다. score_protections(nx, pie, canary, relro)
+  순수 함수를 분리해 elf_tool 이 직접 호출하게 바꿨다. 텍스트 파서는
+  사람/LLM 이 문자열을 넣는 mitigation 도구에서만 쓰고, 그 파서도 내부
+  적으로 같은 순수 함수에 위임한다. 핵심 경로에서 파서 버그가 구조적
+  으로 발생할 수 없다.
+- 비-UTF8 파일명 크래시 수정: 파이썬이 surrogate 문자로 보존하는 비-
+  UTF8 파일명이 JSON(UTF-8) 직렬화에서 죽였다. 경로/파일명을
+  surrogateescape→backslashreplace 로 표시용 문자열로 바꾸고, 배치는
+  파일 단위로 예외를 격리해 한 파일이 실패해도 전체 스캔이 계속된다.
+- 동시성/경로 접근 범위는 README 한계에 명시(아래 참고).

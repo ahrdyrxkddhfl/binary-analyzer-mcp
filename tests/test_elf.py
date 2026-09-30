@@ -258,3 +258,100 @@ def test_load_existing_survives_non_dict_line(tmp_path):
     p.write_text('{"path":"/x"}\n[1]\n{"path":"/y"}\n')
     records = _load_existing(str(p))
     assert "/x" in records and "/y" in records
+
+
+def test_scan_removes_deleted_file(nested_dir, tmp_path):
+    """스캔 대상이던 파일이 삭제되면 그 행도 제거된다(stale 실동작)."""
+    d = nested_dir
+    out = str(tmp_path / "results.jsonl")
+
+    r1 = scan_directory(d, out)
+    before = r1["metrics"]["total_rows"]
+    assert before >= 2
+
+    # a1 을 지우고 다시 스캔하면 행이 하나 줄어야 한다.
+    os.remove(os.path.join(d, "a1"))
+    r2 = scan_directory(d, out)
+    assert r2["metrics"]["total_rows"] == before - 1
+
+
+def test_scan_dotfile_not_deleted_by_star(nested_dir, tmp_path):
+    """'.*' 로 적재한 dotfile 행이 '*' 스캔에 지워지지 않는다."""
+    if not shutil.which("gcc"):
+        pytest.skip("gcc not available")
+    d = nested_dir
+    hidden = os.path.join(d, ".hidden")
+    if not _compile(_SAFE_C, [], hidden):
+        pytest.skip("could not build hidden ELF")
+    out = str(tmp_path / "r.jsonl")
+
+    r_dot = scan_directory(d, out, ".*")
+    dot_rows = r_dot["metrics"]["total_rows"]
+    assert dot_rows >= 1  # .hidden
+
+    r_star = scan_directory(d, out, "*")
+    # '*' 는 dotfile 을 안 보므로 .hidden 행은 유지돼야 한다.
+    with open(out) as f:
+        keys = {__import__("json").loads(l)["path"] for l in f if l.strip()}
+    assert any(k.endswith("/.hidden") for k in keys)
+
+
+def test_object_file_error_code(nested_dir):
+    """.o 파일은 UNSUPPORTED_ELF_TYPE 로 반환된다."""
+    o_path = os.path.join(nested_dir, "obj.o")
+    subprocess.run(
+        ["gcc", "-c", os.path.join(nested_dir, "lib.c"), "-o", o_path],
+        capture_output=True,
+    )
+    if not (os.path.isfile(o_path) and _is_elf(o_path)):
+        pytest.skip("could not build .o ELF")
+    result = analyze_elf(o_path)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "UNSUPPORTED_ELF_TYPE"
+
+
+def test_analyze_elf_norelro_is_none(tmp_path):
+    """-Wl,-z,norelro 빌드는 RELRO NONE 으로, mitigation 도 relro 없음."""
+    if not shutil.which("gcc"):
+        pytest.skip("gcc not available")
+    out = str(tmp_path / "norelro")
+    if not _compile(_SAFE_C, ["-Wl,-z,norelro", "-no-pie"], out):
+        pytest.skip("could not build norelro ELF")
+    result = analyze_elf(out)
+    assert result["protections"]["relro"] == "NONE"
+    enabled = result["mitigation_analysis"]["enabled_protections"]
+    assert [x for x in enabled if "relro" in x] == []
+
+
+def test_executable_shared_object_not_pie():
+    """libc.so.6 같은 실행 가능 .so 는 PIE 로 잡히지 않는다."""
+    import glob as _glob
+    libcs = _glob.glob("/lib/**/libc.so.6", recursive=True) + \
+        _glob.glob("/usr/lib/**/libc.so.6", recursive=True)
+    libcs = [p for p in libcs if os.path.isfile(p)]
+    if not libcs:
+        pytest.skip("libc.so.6 not found")
+    result = analyze_elf(libcs[0])
+    assert result["ok"] is True
+    assert result["protections"]["pie"] is False
+
+
+def test_scan_survives_non_utf8_filename(nested_dir, tmp_path):
+    """비-UTF8 파일명이 있어도 배치 전체가 죽지 않는다(회귀)."""
+    d = nested_dir
+    # 정상 ELF 를 비-UTF8 이름으로 복사.
+    good = os.path.join(d, "a2")
+    if not os.path.isfile(good):
+        pytest.skip("no ELF to copy")
+    bad = os.path.join(d.encode(), b"bad\xffname")
+    with open(good, "rb") as src, open(bad, "wb") as dst:
+        dst.write(src.read())
+
+    out = str(tmp_path / "r.jsonl")
+    result = scan_directory(d, out)  # 죽지 않아야 한다
+    assert result["ok"] is True
+    # 결과 파일이 정상적으로 읽혀야 한다(surrogate 없이 기록).
+    import json
+    with open(out) as f:
+        rows = [json.loads(l) for l in f if l.strip()]
+    assert len(rows) >= 1

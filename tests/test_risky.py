@@ -73,3 +73,10 @@ def test_risky_digit_separator_quote():
     code = "int x = 1'000; strcpy(a, b);"
     result = check_risky_functions(code, "buffer_overflow")
     assert "strcpy" in result["found_functions"]
+
+
+def test_risky_wide_char_literal():
+    """L'x' 같은 와이드 문자 리터럴 뒤의 실제 호출을 놓치지 않는다."""
+    code = "if (c == L'\"') strcpy(a, b);"
+    result = check_risky_functions(code, "buffer_overflow")
+    assert "strcpy" in result["found_functions"]

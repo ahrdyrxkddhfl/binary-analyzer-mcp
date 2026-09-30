@@ -60,11 +60,12 @@ def _strip_comments_and_strings(code: str) -> str:
                 out.append(" ")
                 i += 1
             elif c == "'":
-                # C23 자릿수 구분자(1'000)의 홑따옴표는 문자 리터럴이
-                # 아니다. 바로 앞 글자가 영숫자면 구분자로 보고 리터럴로
-                # 진입하지 않는다(그대로 두어도 함수 호출 탐지에 무해).
+                # C23 자릿수 구분자(1'000)의 홑따옴표만 리터럴이 아니다.
+                # 조건을 "바로 앞 글자가 숫자"로 좁힌다. 'a'(앞이 공백/기호)
+                # 는 물론, L'x' u'x' U'x' 같은 와이드/유니코드 문자 리터럴
+                # (앞이 문자 L/u/U)도 정상적으로 리터럴로 인식된다.
                 prev = code[i - 1] if i > 0 else ""
-                if prev.isalnum():
+                if prev.isdigit():
                     out.append(c)
                     i += 1
                 else:
