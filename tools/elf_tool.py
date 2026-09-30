@@ -18,7 +18,7 @@ from elftools.elf.dynamic import DynamicSection
 
 from common import make_error, get_logger
 from tools.symbol_tool import analyze_symbol_table
-from tools.mitigation_tool import score_protections
+from tools.mitigation_tool import score_protections, build_mitigation_result
 
 logger = get_logger(__name__)
 
@@ -237,20 +237,9 @@ def analyze_elf(path: str) -> dict:
     # 파싱하지 않고 순수 함수 score_protections 에 값을 직접 넘긴다.
     # 이렇게 하면 핵심 경로에 텍스트 파서 버그가 끼어들 수 없다.
     scored = score_protections(nx, pie, canary, relro.lower())
-    mitigation_analysis = {
-        "ok": True,
-        "protection": protection_str,
-        "target_vulnerability": "buffer overflow",
-        "enabled_protections": scored["enabled_protections"],
-        "score": scored["score"],
-        "difficulty": scored["difficulty"],
-        "theory": scored["theory"],
-        "analysis": (
-            f"Exploit difficulty estimated as {scored['difficulty']} "
-            f"(score {scored['score']}) based on enabled protections: "
-            f"{', '.join(scored['enabled_protections']) if scored['enabled_protections'] else 'none'}."
-        ),
-    }
+    mitigation_analysis = build_mitigation_result(
+        scored, protection_str, "buffer overflow"
+    )
 
     safe_name = os.path.basename(path).encode(
         "utf-8", "surrogateescape"

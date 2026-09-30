@@ -213,7 +213,7 @@ def scan_directory(
     # stale 제거: 이번 스캔 디렉터리 직속이면서 이번 glob 이 매칭했을
     # 규칙에 맞는 행 중, 이번에 ELF 로 적재되지 못한 것(삭제됐거나 더
     # 이상 ELF 가 아님)을 지운다. 삭제된 파일은 glob 결과에 없으므로
-    # candidate_keys 만으로는 지울 수 없어, 직속 여부 + pattern 매칭을
+    # glob 결과만으로는 지울 수 없어, 직속 여부 + pattern 매칭을
     # 다시 계산하되 glob 의 dotfile 규칙을 똑같이 따른다: pattern 이
     # '.' 로 시작하지 않으면 dotfile(.으로 시작하는 이름)은 매칭에서
     # 제외한다. 이렇게 해야 '.*' 로 적재한 dotfile 행이 '*' 스캔에

@@ -219,6 +219,40 @@ def score_protections(nx: bool, pie: bool, canary: bool, relro: str) -> dict:
     }
 
 
+def build_mitigation_result(
+    scored: dict, protection: str, target_vuln: str
+) -> dict:
+    """score_protections 결과를 툴 응답 형태로 감싼다.
+
+    elf_tool 과 get_exploit_mitigation_info 가 같은 응답 dict 를 각자
+    조립하면 한쪽만 바뀔 때 어긋난다. 조립을 이 헬퍼 한 곳으로 모아
+    두 경로의 출력이 항상 같게 한다.
+
+    Args:
+        scored: score_protections 가 돌려준 딕셔너리.
+        protection: 응답에 기록할 보호기법 설명 문자열.
+        target_vuln: 대상 취약점 유형.
+
+    Returns:
+        ok/protection/난이도/이론/analysis 를 담은 응답 딕셔너리.
+    """
+    enabled = scored["enabled_protections"]
+    return {
+        "ok": True,
+        "protection": protection,
+        "target_vulnerability": target_vuln,
+        "enabled_protections": enabled,
+        "score": scored["score"],
+        "difficulty": scored["difficulty"],
+        "theory": scored["theory"],
+        "analysis": (
+            f"Exploit difficulty estimated as {scored['difficulty']} "
+            f"(score {scored['score']}) based on enabled protections: "
+            f"{', '.join(enabled) if enabled else 'none'}."
+        ),
+    }
+
+
 def get_exploit_mitigation_info(protection: str, target_vuln: str) -> dict:
     """보호기법 조합으로 익스플로잇 난이도를 추정한다.
 
@@ -264,17 +298,4 @@ def get_exploit_mitigation_info(protection: str, target_vuln: str) -> dict:
         scored["difficulty"],
     )
 
-    return {
-        "ok": True,
-        "protection": protection,
-        "target_vulnerability": target_vuln,
-        "enabled_protections": scored["enabled_protections"],
-        "score": scored["score"],
-        "difficulty": scored["difficulty"],
-        "theory": scored["theory"],
-        "analysis": (
-            f"Exploit difficulty estimated as {scored['difficulty']} "
-            f"(score {scored['score']}) based on enabled protections: "
-            f"{', '.join(scored['enabled_protections']) if scored['enabled_protections'] else 'none'}."
-        ),
-    }
+    return build_mitigation_result(scored, protection, target_vuln)

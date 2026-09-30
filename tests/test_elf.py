@@ -339,10 +339,15 @@ def test_executable_shared_object_not_pie():
 def test_scan_survives_non_utf8_filename(nested_dir, tmp_path):
     """비-UTF8 파일명이 있어도 배치 전체가 죽지 않는다(회귀)."""
     d = nested_dir
-    # 정상 ELF 를 비-UTF8 이름으로 복사.
     good = os.path.join(d, "a2")
     if not os.path.isfile(good):
         pytest.skip("no ELF to copy")
+
+    # 문제의 파일을 만들기 전에 기준 스캔 수를 잰다.
+    baseline = scan_directory(d, str(tmp_path / "base.jsonl"))
+    base_scanned = baseline["metrics"]["scanned"]
+
+    # 정상 ELF 를 비-UTF8 이름으로 복사.
     bad = os.path.join(d.encode(), b"bad\xffname")
     with open(good, "rb") as src, open(bad, "wb") as dst:
         dst.write(src.read())
@@ -350,8 +355,11 @@ def test_scan_survives_non_utf8_filename(nested_dir, tmp_path):
     out = str(tmp_path / "r.jsonl")
     result = scan_directory(d, out)  # 죽지 않아야 한다
     assert result["ok"] is True
+    # 문제의 파일까지 실제로 적재돼 scanned 가 하나 늘어야 한다
+    # (단순히 죽지 않은 것을 넘어, 해당 파일이 처리됐음을 확인).
+    assert result["metrics"]["scanned"] == base_scanned + 1
     # 결과 파일이 정상적으로 읽혀야 한다(surrogate 없이 기록).
     import json
     with open(out) as f:
         rows = [json.loads(l) for l in f if l.strip()]
-    assert len(rows) >= 1
+    assert len(rows) == result["metrics"]["scanned"]
