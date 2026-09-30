@@ -1,4 +1,14 @@
+# Smithery 배포 설정. stdio 타입 MCP 서버.
 startCommand:
-  python:
-    - "-u"
-    - "mcp_server.py"
+  type: stdio
+  # 이 서버는 실행에 필요한 필수 설정이 없다.
+  configSchema:
+    type: object
+    properties: {}
+  # stdio 로 서버를 띄우는 명령을 돌려주는 함수.
+  commandFunction: |
+    (config) => ({
+      command: 'python',
+      args: ['-u', 'mcp_server.py']
+    })
+  exampleConfig: {}
