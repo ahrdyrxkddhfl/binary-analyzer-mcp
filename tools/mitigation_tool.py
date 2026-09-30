@@ -3,6 +3,12 @@
 바이너리에 적용된 보호기법 조합을 받아 공격 난이도를 추정하고,
 각 보호기법이 공격에 어떤 제약을 주는지 이론적으로 설명한다.
 가중치와 난이도 구간은 config.yaml 에서 읽는다.
+
+입력 문자열은 사람이 쓴 표기, checksec/pwntools 출력 등 형식이
+제각각이므로, 각 보호기법마다 (1) 그 기법을 가리키는 별칭 토큰과
+(2) "꺼짐"을 뜻하는 부정 패턴을 명시적으로 두고, 별칭이 등장했고
+부정 표현이 없을 때만 "켜짐"으로 본다. RELRO 는 full/partial 을
+구분한다.
 """
 
 import re
@@ -12,14 +18,27 @@ from common import make_error, get_logger
 
 logger = get_logger(__name__)
 
-# 보호기법 이름 → config 키. 문자열에서 이 별칭들을 찾아 어떤
-# 보호기법을 말하는지 식별한다.
+# 각 보호기법을 가리키는 별칭. 단어 경계로 감싸 매칭하므로
+# "independent" 안의 "dep" 같은 부분 문자열 오탐이 없다.
+# 여러 단어 별칭(position independent)은 공백을 포함해 그대로 찾는다.
 _ALIASES = {
-    "nx": ["nx", "dep", "no-execute"],
-    "canary": ["canary", "stack canary", "stack_chk", "ssp"],
-    "pie": ["pie", "aslr", "position independent"],
-    "relro": ["relro"],
+    "nx": [r"nx", r"dep", r"no[\s_-]?execute", r"nx[\s_-]?bit"],
+    "canary": [r"canary", r"stack[\s_-]?canary", r"stack_chk", r"ssp", r"stack[\s_-]?protector"],
+    "pie": [r"pie", r"pic", r"position[\s_-]?independent"],
+    "relro": [r"relro"],
 }
+
+# 각 보호기법의 "꺼짐"을 뜻하는 표현. 별칭 근처(구분자 :/= 포함)에
+# 이 패턴이 있으면 비활성으로 본다. checksec 의 "No canary found",
+# "NX disabled", "No PIE", pwntools 의 "NX:      No" 등을 포괄한다.
+_DISABLED = re.compile(
+    r"(disabled|disable|\bno\b|\bnone\b|\boff\b|not[\s_-]+enabled|"
+    r"\bnon[\s_-]?|\bnot\b|\bfalse\b)"
+)
+
+# RELRO 수준 표현.
+_RELRO_FULL = re.compile(r"\bfull\b")
+_RELRO_PARTIAL = re.compile(r"\bpartial\b")
 
 # 각 보호기법이 공격에 주는 제약 설명. 난이도 근거를 사람이 읽을 수
 # 있게 덧붙이는 용도.
@@ -27,39 +46,81 @@ _THEORY = {
     "nx": "데이터 영역 실행이 막혀 셸코드를 직접 올려 실행할 수 없다. ROP/ret2libc 등 코드 재사용 공격이 필요하다.",
     "canary": "스택 카나리가 있어 스택 버퍼 오버플로우로 저장된 복귀 주소를 덮으려면 카나리 값을 먼저 알아내야 한다.",
     "pie": "실행 파일이 위치 독립이라 주소가 실행마다 바뀐다. 주소 유출(info leak)로 베이스를 먼저 구해야 한다.",
-    "relro": "GOT가 읽기 전용이라 GOT 덮어쓰기로 흐름을 가로채는 공격이 막힌다(Full RELRO 기준).",
+    "relro_full": "GOT 전체가 읽기 전용이라 GOT 덮어쓰기 공격이 막힌다(Full RELRO).",
+    "relro_partial": "Partial RELRO 는 .got 만 보호하고 .got.plt 는 여전히 쓰기 가능해, GOT 덮어쓰기를 완전히 막지는 못한다.",
 }
 
 
-def _is_enabled(protection_text: str, aliases: list) -> bool:
-    """보호기법 문자열에서 특정 기법이 '켜져' 있는지 판정한다.
-
-    기존 버그의 핵심 수정 지점이다. 단순히 "NX" 가 문자열에 들어
-    있는지만 보면 "NX disabled" 도 켜진 것으로 오판한다. 여기서는
-    별칭이 등장한 위치 주변에 부정어(disabled, no, off, none)가 있는지
-    확인해 실제 활성 여부를 가린다.
+def _find_alias(text: str, alias_patterns: list):
+    """별칭이 등장한 위치들을 (start, end) 로 돌려준다.
 
     Args:
-        protection_text: 소문자로 바꾼 보호기법 설명 문자열.
-        aliases: 해당 보호기법을 가리키는 별칭 목록.
+        text: 소문자로 바꾼 보호기법 설명 문자열.
+        alias_patterns: 해당 보호기법 별칭 정규식 목록.
 
     Returns:
-        해당 보호기법이 활성으로 판단되면 True.
+        매칭 구간 (start, end) 리스트. 없으면 빈 리스트.
     """
-    for alias in aliases:
-        for m in re.finditer(re.escape(alias), protection_text):
-            # 별칭 "바로 앞" 표현만 본다. 넓은 윈도우로 보면 뒤따르는
-            # 다른 항목의 부정어(예: "NX enabled, no PIE")까지 삼켜
-            # 오판한다. 앞쪽 부정 접두(no/not/without)와 뒤쪽 상태어
-            # (disabled/off)만 각각 확인한다.
-            before = protection_text[max(0, m.start() - 8):m.start()]
-            after = protection_text[m.end():m.end() + 10]
-            if re.search(r"(no|not|without)[\s_-]*$", before):
-                continue
-            if re.search(r"^\s*(disabled|disable|off|none)", after):
-                continue
-            return True
+    spans = []
+    for pat in alias_patterns:
+        # 별칭을 단어 경계로 감싸 부분 문자열 오탐을 막는다.
+        for m in re.finditer(r"(?<![a-z])" + pat + r"(?![a-z])", text):
+            spans.append((m.start(), m.end()))
+    return spans
+
+
+def _is_enabled(text: str, key: str) -> bool:
+    """보호기법이 활성인지 판정한다.
+
+    별칭이 문자열에 있고, 그 별칭 근처(뒤쪽 구분자·상태어 또는 바로 앞
+    부정 접두)에 "꺼짐" 표현이 없을 때만 True. checksec 처럼 별칭이
+    "카테고리 라벨"로 한 번, "상태"로 또 한 번 나오는 경우("NX: NX
+    disabled")도, disabled 가 근처에 있으면 꺼짐으로 잡는다.
+
+    Args:
+        text: 소문자로 바꾼 보호기법 설명 문자열.
+        key: 보호기법 키(nx/canary/pie/relro).
+
+    Returns:
+        활성으로 판단되면 True.
+    """
+    spans = _find_alias(text, _ALIASES[key])
+    if not spans:
+        return False
+
+    for start, end in spans:
+        # 별칭 앞 6자 + 뒤 16자(구분자와 상태어를 담기 충분한 창).
+        before = text[max(0, start - 6):start]
+        after = text[end:end + 16]
+        # 바로 앞이 부정 접두(no/non/not)면 꺼짐.
+        if re.search(r"(no|non|not|without)[\s_:=-]*$", before):
+            continue
+        # 뒤쪽에 disabled/off/no 등이 오면 꺼짐. 단 다른 보호기법의
+        # 상태를 삼키지 않도록 콤마 이전까지만 본다.
+        after_segment = re.split(r"[,;|]", after)[0]
+        if _DISABLED.search(after_segment):
+            continue
+        return True
     return False
+
+
+def _relro_level(text: str) -> str:
+    """RELRO 수준을 판정한다.
+
+    Returns:
+        "full", "partial", "none" 중 하나.
+    """
+    if not _find_alias(text, _ALIASES["relro"]):
+        return "none"
+    # "no relro" 형태면 none.
+    if re.search(r"(no|non|not)[\s_:=-]*relro", text):
+        return "none"
+    if _RELRO_FULL.search(text):
+        return "full"
+    if _RELRO_PARTIAL.search(text):
+        return "partial"
+    # relro 는 있다고 했으나 수준 표기가 없으면 보수적으로 partial.
+    return "partial"
 
 
 def get_exploit_mitigation_info(protection: str, target_vuln: str) -> dict:
@@ -67,7 +128,8 @@ def get_exploit_mitigation_info(protection: str, target_vuln: str) -> dict:
 
     Args:
         protection: 적용된 보호기법 설명 문자열
-            (예: "NX enabled, PIE enabled, No canary").
+            (예: "NX enabled, PIE enabled, No canary, Full RELRO").
+            checksec/pwntools 출력 형식도 받는다.
         target_vuln: 대상 취약점 유형(예: "buffer overflow").
 
     Returns:
@@ -91,13 +153,26 @@ def get_exploit_mitigation_info(protection: str, target_vuln: str) -> dict:
     enabled = []
     score = 0
     theory = {}
-    for key, aliases in _ALIASES.items():
-        if _is_enabled(text, aliases):
+
+    # NX / PIE / Canary 는 켜짐 여부만 본다.
+    for key in ("nx", "pie", "canary"):
+        if _is_enabled(text, key):
             enabled.append(key)
             score += weights.get(key, 0)
             theory[key] = _THEORY[key]
 
-    # config 의 구간으로 점수를 난이도로 환산한다.
+    # RELRO 는 수준별로 가중치를 다르게 준다. Partial 은 .got.plt 가
+    # 여전히 쓰기 가능하므로 Full 의 절반만 인정한다.
+    relro = _relro_level(text)
+    if relro == "full":
+        enabled.append("relro:full")
+        score += weights.get("relro_full", weights.get("relro", 1))
+        theory["relro"] = _THEORY["relro_full"]
+    elif relro == "partial":
+        enabled.append("relro:partial")
+        score += weights.get("relro_partial", 0)
+        theory["relro"] = _THEORY["relro_partial"]
+
     if score >= thresholds["high_min"]:
         difficulty = "High"
     elif score >= thresholds["medium_min"]:

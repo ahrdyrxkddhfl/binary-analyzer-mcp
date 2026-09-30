@@ -20,11 +20,11 @@ dangerous_functions:
     severity: high
   strcpy:
     reason: "목적지 버퍼 크기를 확인하지 않아 오버플로우가 발생할 수 있다."
-    fix: "strncpy 또는 strlcpy로 길이를 제한한다."
+    fix: "snprintf 로 길이를 제한하거나, 목적지 크기를 검증한 뒤 복사한다. strncpy 는 버퍼가 꽉 차면 NUL 종료를 보장하지 않으니 주의한다."
     severity: high
   strcat:
     reason: "목적지 남은 공간을 확인하지 않고 이어 붙여 오버플로우가 발생할 수 있다."
-    fix: "strncat 또는 strlcat 사용."
+    fix: "복사 전 남은 공간을 계산해 snprintf 로 이어 붙이거나 경계를 검증한다."
     severity: high
   sprintf:
     reason: "출력 길이를 제한하지 않아 목적지 버퍼를 넘길 수 있다."
@@ -53,12 +53,15 @@ symbol_categories:
   network: [socket, connect, accept, recv, send, bind, listen]
   execution: [system, execve, execl, execlp, popen, fork]
   file: [open, read, write, fopen, fread, fwrite, unlink]
-  memory: [strcpy, strcat, sprintf, gets, scanf, memcpy, malloc, free]
+  # 오버플로우를 직접 유발하는 위험 함수만. malloc/free 같은 흔한
+  # 할당 함수는 그 자체로 위험 신호가 아니므로 넣지 않는다(넣으면
+  # 거의 모든 바이너리가 High 로 분류돼 우선순위가 무의미해진다).
+  dangerous_memory: [strcpy, strcat, sprintf, gets, scanf, memcpy]
 
 # 위 카테고리 중 익스플로잇/악성 행위와 직접 연결되어 우선 분석해야
 # 하는 카테고리. 여기 속한 심볼이 하나라도 있으면 분석 우선순위를
 # High 로 올린다. 목록을 늘리면 더 많은 경우가 High 로 분류된다.
-high_priority_categories: [execution, memory]
+high_priority_categories: [execution, dangerous_memory]
 
 # -------------------------------------------------------------
 # 익스플로잇 난이도 점수
@@ -70,7 +73,8 @@ mitigation_weights:
   nx: 1        # 데이터 영역 실행 차단 → 셸코드 직접 실행 불가(ROP 필요)
   canary: 1    # 스택 카나리 → 스택 오버플로우로 저장된 RET 덮기 어려움
   pie: 1       # 위치 독립 실행 → 주소 예측 불가(정보 유출 선행 필요)
-  relro: 1     # GOT 보호 → GOT 덮어쓰기 공격 차단
+  relro_full: 1     # GOT 전체 보호 → GOT 덮어쓰기 차단
+  relro_partial: 0  # .got.plt 는 여전히 쓰기 가능 → 온전한 보호로 치지 않음
 
 # 난이도 점수 구간. 켜진 보호기법 점수 합계가
 #   high_min 이상  → High
