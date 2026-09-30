@@ -124,20 +124,26 @@ def _relro_level(text: str) -> str:
         return "none"
 
     start, end = spans[0]
-    # relro 별칭이 속한 구간만 잘라낸다(앞뒤 구분자 사이).
-    # 앞쪽 구분자 이후부터.
-    seg_start = max(
+    # relro 별칭이 속한 구간을 잡는다. 먼저 구분자(,;|줄바꿈) 사이로
+    # 자르고, 그 위에 별칭 바로 앞뒤 좁은 창을 한 번 더 씌운다. 구분자가
+    # 전혀 없는 입력("NX disabled PIE enabled Full RELRO")에서는 구간이
+    # 문자열 전체가 되어, 다른 항목의 부정어(NX 의 disabled)나 값(다른
+    # full)을 RELRO 것으로 잘못 가져오기 때문이다.
+    sep_start = max(
         (text.rfind(sep, 0, start) for sep in [",", ";", "|", "\n"]),
         default=-1,
     )
-    seg_start = seg_start + 1 if seg_start >= 0 else 0
-    # 뒤쪽 구분자 이전까지.
-    seg_end_candidates = [
+    sep_start = sep_start + 1 if sep_start >= 0 else 0
+    sep_end_candidates = [
         text.find(sep, end) for sep in [",", ";", "|", "\n"]
     ]
-    seg_end_candidates = [p for p in seg_end_candidates if p >= 0]
-    seg_end = min(seg_end_candidates) if seg_end_candidates else len(text)
-    segment = text[seg_start:seg_end]
+    sep_end_candidates = [p for p in sep_end_candidates if p >= 0]
+    sep_end = min(sep_end_candidates) if sep_end_candidates else len(text)
+
+    # 별칭 앞 8자 / 뒤 16자 창과 구분자 구간의 교집합을 쓴다.
+    win_start = max(sep_start, start - 8)
+    win_end = min(sep_end, end + 16)
+    segment = text[win_start:win_end]
 
     # 이 구간 안에 부정어가 있으면 none.
     if re.search(r"\b(no|non|not|disabled|disable|off|none)\b", segment):
@@ -150,8 +156,77 @@ def _relro_level(text: str) -> str:
     return "partial"
 
 
+def score_protections(nx: bool, pie: bool, canary: bool, relro: str) -> dict:
+    """구조화된 보호기법 값으로 익스플로잇 난이도를 계산한다(순수 함수).
+
+    문자열 파싱을 거치지 않고 불리언/열거값을 직접 받는다. elf_tool 처럼
+    이미 정확한 값을 아는 호출자는 이 함수를 바로 쓰고, 사람이나 LLM 이
+    문자열을 넣는 경우에만 get_exploit_mitigation_info 의 텍스트 파서를
+    거친다. 핵심 경로에서 파서 버그가 끼어들 수 없게 하기 위한 분리다.
+
+    Args:
+        nx: NX(스택 실행 방지) 활성 여부.
+        pie: PIE(위치 독립 실행) 활성 여부.
+        canary: 스택 카나리 활성 여부.
+        relro: "full" / "partial" / "none" (대소문자 무시).
+
+    Returns:
+        enabled_protections, score, difficulty, theory 를 담은 딕셔너리.
+    """
+    config = load_config()
+    weights = config["mitigation_weights"]
+    thresholds = config["difficulty_thresholds"]
+
+    enabled = []
+    score = 0
+    theory = {}
+
+    if nx:
+        enabled.append("nx")
+        score += weights.get("nx", 0)
+        theory["nx"] = _THEORY["nx"]
+    if pie:
+        enabled.append("pie")
+        score += weights.get("pie", 0)
+        theory["pie"] = _THEORY["pie"]
+    if canary:
+        enabled.append("canary")
+        score += weights.get("canary", 0)
+        theory["canary"] = _THEORY["canary"]
+
+    relro_norm = (relro or "none").lower()
+    if relro_norm == "full":
+        enabled.append("relro:full")
+        score += weights.get("relro_full", weights.get("relro", 1))
+        theory["relro"] = _THEORY["relro_full"]
+    elif relro_norm == "partial":
+        enabled.append("relro:partial")
+        score += weights.get("relro_partial", 0)
+        theory["relro"] = _THEORY["relro_partial"]
+
+    if score >= thresholds["high_min"]:
+        difficulty = "High"
+    elif score >= thresholds["medium_min"]:
+        difficulty = "Medium"
+    else:
+        difficulty = "Low"
+
+    return {
+        "enabled_protections": enabled,
+        "score": score,
+        "difficulty": difficulty,
+        "theory": theory,
+    }
+
+
 def get_exploit_mitigation_info(protection: str, target_vuln: str) -> dict:
     """보호기법 조합으로 익스플로잇 난이도를 추정한다.
+
+    이 함수는 사람/LLM 이 넣은 자유 형식 문자열을 해석하는 진입점이다.
+    문자열에서 각 보호기법의 활성 여부를 파싱한 뒤, 실제 점수 계산은
+    구조화된 값을 받는 score_protections 에 위임한다. 정확한 값을 이미
+    아는 호출자(elf_tool)는 이 파서를 거치지 말고 score_protections 를
+    직접 써야 한다.
 
     Args:
         protection: 적용된 보호기법 설명 문자열
@@ -171,61 +246,35 @@ def get_exploit_mitigation_info(protection: str, target_vuln: str) -> dict:
             hint="Provide both fields",
         )
 
-    config = load_config()
-    weights = config["mitigation_weights"]
-    thresholds = config["difficulty_thresholds"]
-
     text = protection.lower()
 
-    enabled = []
-    score = 0
-    theory = {}
-
-    # NX / PIE / Canary 는 켜짐 여부만 본다.
-    for key in ("nx", "pie", "canary"):
-        if _is_enabled(text, key):
-            enabled.append(key)
-            score += weights.get(key, 0)
-            theory[key] = _THEORY[key]
-
-    # RELRO 는 수준별로 가중치를 다르게 준다. Partial 은 .got.plt 가
-    # 여전히 쓰기 가능해 온전한 보호로 보기 어려우므로, config 에서
-    # relro_partial 가중치를 0 으로 두었다(Full 만 점수를 준다).
+    # 문자열 → 구조화된 값(불리언/열거)으로 파싱.
+    nx = _is_enabled(text, "nx")
+    pie = _is_enabled(text, "pie")
+    canary = _is_enabled(text, "canary")
     relro = _relro_level(text)
-    if relro == "full":
-        enabled.append("relro:full")
-        score += weights.get("relro_full", weights.get("relro", 1))
-        theory["relro"] = _THEORY["relro_full"]
-    elif relro == "partial":
-        enabled.append("relro:partial")
-        score += weights.get("relro_partial", 0)
-        theory["relro"] = _THEORY["relro_partial"]
 
-    if score >= thresholds["high_min"]:
-        difficulty = "High"
-    elif score >= thresholds["medium_min"]:
-        difficulty = "Medium"
-    else:
-        difficulty = "Low"
+    # 실제 점수 계산은 순수 함수에 위임.
+    scored = score_protections(nx, pie, canary, relro)
 
     logger.info(
         "mitigation: score=%d enabled=%s -> %s",
-        score,
-        enabled,
-        difficulty,
+        scored["score"],
+        scored["enabled_protections"],
+        scored["difficulty"],
     )
 
     return {
         "ok": True,
         "protection": protection,
         "target_vulnerability": target_vuln,
-        "enabled_protections": enabled,
-        "score": score,
-        "difficulty": difficulty,
-        "theory": theory,
+        "enabled_protections": scored["enabled_protections"],
+        "score": scored["score"],
+        "difficulty": scored["difficulty"],
+        "theory": scored["theory"],
         "analysis": (
-            f"Exploit difficulty estimated as {difficulty} "
-            f"(score {score}) based on enabled protections: "
-            f"{', '.join(enabled) if enabled else 'none'}."
+            f"Exploit difficulty estimated as {scored['difficulty']} "
+            f"(score {scored['score']}) based on enabled protections: "
+            f"{', '.join(scored['enabled_protections']) if scored['enabled_protections'] else 'none'}."
         ),
     }

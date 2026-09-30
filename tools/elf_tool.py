@@ -18,7 +18,7 @@ from elftools.elf.dynamic import DynamicSection
 
 from common import make_error, get_logger
 from tools.symbol_tool import analyze_symbol_table
-from tools.mitigation_tool import get_exploit_mitigation_info
+from tools.mitigation_tool import score_protections
 
 logger = get_logger(__name__)
 
@@ -84,11 +84,14 @@ def _detect_pie(elf: ELFFile) -> bool:
     ET_DYN 은 PIE 실행 파일과 공유 라이브러리(.so)가 공유하는 타입
     이라, ET_DYN 만으로 PIE 라 하면 .so 까지 PIE 로 오판한다. 두 신호로
     구분한다: (1) 동적 플래그 DT_FLAGS_1 의 DF_1_PIE 비트, (2) 프로그램
-    인터프리터 세그먼트 PT_INTERP 존재. PIE 실행 파일은 동적 링커로
-    실행되므로 PT_INTERP 를 갖지만 .so 는 갖지 않는다. DF_1_PIE 는
-    비교적 최근 binutils 부터 설정되므로, 오래된 툴체인으로 빌드한
-    PIE 를 놓치지 않도록 PT_INTERP 를 함께 본다. (checksec.sh 는
-    전통적으로 DT_DEBUG 유무로 판별한다.)
+    인터프리터 세그먼트 PT_INTERP 가 있으면서 DT_SONAME 이 없을 때.
+
+    PT_INTERP 만으로는 부족하다. libc.so.6 처럼 직접 실행도 되는 공유
+    라이브러리는 PT_INTERP 를 갖기 때문이다. 다만 공유 라이브러리는
+    거의 항상 DT_SONAME(라이브러리 이름)을 갖고 PIE 실행 파일은 갖지
+    않으므로, PT_INTERP 가 있고 DT_SONAME 이 없을 때만 PIE 로 본다.
+    DF_1_PIE 는 비교적 최근 binutils 부터 설정되므로 이 조합을 함께
+    쓴다. (checksec.sh 는 전통적으로 DT_DEBUG 유무로 판별한다.)
 
     Returns:
         PIE 실행 파일이면 True.
@@ -97,19 +100,27 @@ def _detect_pie(elf: ELFFile) -> bool:
         return False
 
     _DF_1_PIE = 0x08000000  # DT_FLAGS_1 의 DF_1_PIE 비트(ELF 스펙 고정값).
+    has_soname = False
+    has_pie_flag = False
     for section in elf.iter_sections():
         if isinstance(section, DynamicSection):
             for tag in section.iter_tags():
+                if tag.entry.d_tag == "DT_SONAME":
+                    has_soname = True
                 if tag.entry.d_tag == "DT_FLAGS_1" and (
                     tag.entry.d_val & _DF_1_PIE
                 ):
-                    return True
+                    has_pie_flag = True
 
-    # PT_INTERP 가 있으면 동적 링커로 실행되는 실행 파일 = PIE.
-    # (.so 는 PT_INTERP 가 없다.)
-    for seg in elf.iter_segments():
-        if seg["p_type"] == "PT_INTERP":
-            return True
+    if has_pie_flag:
+        return True
+
+    # PT_INTERP 가 있으면서 SONAME 이 없으면 PIE 실행 파일.
+    # (libc 같은 실행 가능 .so 는 SONAME 이 있어 여기서 걸러진다.)
+    if not has_soname:
+        for seg in elf.iter_segments():
+            if seg["p_type"] == "PT_INTERP":
+                return True
 
     return False
 
@@ -191,7 +202,7 @@ def analyze_elf(path: str) -> dict:
             # 제외한다(배치 스캔에서 skip 으로 집계).
             if elf.header["e_type"] == "ET_REL":
                 return make_error(
-                    code="NOT_ELF",
+                    code="UNSUPPORTED_ELF_TYPE",
                     message="relocatable object (.o) is not an executable/library",
                     hint="Provide a linked executable or shared object",
                 )
@@ -221,13 +232,33 @@ def analyze_elf(path: str) -> dict:
     protection_str = ", ".join(protection_parts)
 
     symbol_analysis = analyze_symbol_table(symbols)
-    mitigation_analysis = get_exploit_mitigation_info(
-        protection_str, target_vuln="buffer overflow"
-    )
+
+    # 이미 정확한 불리언/열거값을 알고 있으므로, 문자열로 바꿨다가 다시
+    # 파싱하지 않고 순수 함수 score_protections 에 값을 직접 넘긴다.
+    # 이렇게 하면 핵심 경로에 텍스트 파서 버그가 끼어들 수 없다.
+    scored = score_protections(nx, pie, canary, relro.lower())
+    mitigation_analysis = {
+        "ok": True,
+        "protection": protection_str,
+        "target_vulnerability": "buffer overflow",
+        "enabled_protections": scored["enabled_protections"],
+        "score": scored["score"],
+        "difficulty": scored["difficulty"],
+        "theory": scored["theory"],
+        "analysis": (
+            f"Exploit difficulty estimated as {scored['difficulty']} "
+            f"(score {scored['score']}) based on enabled protections: "
+            f"{', '.join(scored['enabled_protections']) if scored['enabled_protections'] else 'none'}."
+        ),
+    }
+
+    safe_name = os.path.basename(path).encode(
+        "utf-8", "surrogateescape"
+    ).decode("utf-8", "backslashreplace")
 
     logger.info(
         "analyze_elf: %s | NX=%s PIE=%s Canary=%s RELRO=%s | %d symbols",
-        os.path.basename(path),
+        safe_name,
         nx,
         pie,
         canary,
@@ -237,7 +268,7 @@ def analyze_elf(path: str) -> dict:
 
     return {
         "ok": True,
-        "file": os.path.basename(path),
+        "file": safe_name,
         "protections": {
             "nx": nx,
             "pie": pie,
