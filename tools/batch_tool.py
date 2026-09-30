@@ -2,37 +2,68 @@
 
 디렉터리 하나를 받아 그 안의 ELF 파일을 모두 analyze_elf 로 분석하고,
 결과를 JSONL 로 적재한다. 같은 입력으로 다시 돌리거나 중간에 죽고
-재시작해도 결과가 같도록(멱등) 파일 경로를 키로 upsert 한다. 처리
-건수·스킵 건수를 로그로 남긴다.
+재시작해도 결과가 같도록(멱등) 파일의 정규화된 절대경로를 키로 upsert
+한다. 처리 건수·스킵 건수를 로그로 남긴다.
 
 DE 관점 포인트:
-- 멱등성: 파일 경로가 기본키. 재실행 시 중복 행을 만들지 않는다.
+- 멱등성: realpath(절대·심볼릭 정리 경로)가 기본키라, b / ./b /
+  /abs/b 로 같은 파일을 가리켜도 행이 한 개다. 이번 스캔에서 사라진
+  파일의 오래된 행(stale row)은 제거한다.
+- 원자적 쓰기: 임시 파일에 다 쓴 뒤 os.replace 로 교체해, 쓰는 도중
+  죽어도 기존 결과가 통째로 날아가지 않는다.
+- 안전: 출력 경로가 기존 파일이면서 우리 JSONL 형식이 아니면 덮어쓰지
+  않고 거부한다(임의 파일 파괴 방지).
 - 관측: 입력 대비 처리/스킵/에러 건수를 로그로 남긴다.
-- 원본 보존: 분석 결과(정제 데이터)만 JSONL 로 쌓고, 입력 바이너리는
-  건드리지 않는다.
 """
 
 import glob
 import json
 import os
+import tempfile
 
 from common import make_error, get_logger
 from tools.elf_tool import analyze_elf
 
 logger = get_logger(__name__)
 
+# 우리 JSONL 임을 식별하는 마커. 모든 행이 dict 이고 "path" 키를 가진다.
+# 기존 파일이 이 형식이 아니면 사용자가 지정한 다른 파일일 수 있으므로
+# 덮어쓰지 않는다.
+
+
+def _looks_like_our_jsonl(path: str) -> bool:
+    """기존 파일이 우리가 만든 JSONL 형식인지 확인한다.
+
+    첫 비어있지 않은 줄이 "path" 키를 가진 JSON 객체면 우리 형식으로
+    본다. 빈 파일은 새로 써도 안전하므로 True.
+
+    Args:
+        path: 검사할 파일 경로.
+
+    Returns:
+        우리 형식이거나 빈 파일이면 True.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
+                return isinstance(obj, dict) and "path" in obj
+        return True  # 내용 없음 → 덮어써도 안전.
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+        return False
+
 
 def _load_existing(output_path: str) -> dict:
-    """이미 적재된 JSONL 을 읽어 {파일경로: 레코드} 로 만든다.
-
-    재실행 시 기존 결과를 키로 들고 있다가 덮어쓰기(upsert) 하기 위함.
-    깨진 줄은 건너뛰어 부분 손상에도 나머지를 살린다.
+    """이미 적재된 JSONL 을 읽어 {정규화경로: 레코드} 로 만든다.
 
     Args:
         output_path: 기존 결과 JSONL 경로.
 
     Returns:
-        파일 경로를 키로 한 레코드 딕셔너리. 파일이 없으면 빈 dict.
+        정규화 경로를 키로 한 레코드 딕셔너리. 파일이 없으면 빈 dict.
     """
     records = {}
     if not os.path.isfile(output_path):
@@ -50,6 +81,30 @@ def _load_existing(output_path: str) -> dict:
     return records
 
 
+def _atomic_write(output_path: str, records: dict) -> None:
+    """records 를 JSONL 로 원자적으로 기록한다.
+
+    같은 디렉터리에 임시 파일로 먼저 쓴 뒤 os.replace 로 교체한다.
+    os.replace 는 같은 파일시스템에서 원자적이라, 쓰는 도중 죽어도
+    기존 output_path 는 온전히 남는다.
+
+    Args:
+        output_path: 최종 결과 경로.
+        records: 정규화 경로를 키로 한 레코드 딕셔너리.
+    """
+    out_dir = os.path.dirname(os.path.abspath(output_path))
+    fd, tmp = tempfile.mkstemp(dir=out_dir, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            for key in sorted(records):
+                f.write(json.dumps(records[key], ensure_ascii=False) + "\n")
+        os.replace(tmp, output_path)
+    except Exception:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
+
+
 def scan_directory(
     directory: str,
     output_path: str = "scan_results.jsonl",
@@ -59,12 +114,13 @@ def scan_directory(
 
     Args:
         directory: 스캔할 디렉터리 경로.
-        output_path: 결과를 쓸 JSONL 파일 경로.
+        output_path: 결과를 쓸 JSONL 파일 경로. 기존 파일이 우리 JSONL
+            형식이 아니면 덮어쓰지 않고 거부한다.
         pattern: 파일 이름 glob 패턴(기본 "*", 모든 파일).
 
     Returns:
         입력/처리/스킵/에러 건수를 담은 요약 딕셔너리. 디렉터리가
-        없으면 표준 에러 객체.
+        없거나 출력 경로가 안전하지 않으면 표준 에러 객체.
     """
     if not directory or not os.path.isdir(directory):
         return make_error(
@@ -73,14 +129,24 @@ def scan_directory(
             hint="Provide an existing directory path",
         )
 
-    # 기존 결과를 키로 들고 시작 — upsert 로 멱등성 확보.
+    # 출력 경로 안전 검사 — 기존 파일이 우리 형식이 아니면 거부.
+    if os.path.isfile(output_path) and not _looks_like_our_jsonl(output_path):
+        return make_error(
+            code="UNSAFE_OUTPUT",
+            message=f"refusing to overwrite non-JSONL file: {output_path}",
+            hint="Choose a new output path or an existing scan JSONL",
+        )
+
     records = _load_existing(output_path)
 
     candidates = sorted(glob.glob(os.path.join(directory, pattern)))
-    n_input = 0      # ELF 후보(파일)
-    n_scanned = 0    # 실제 분석 성공
-    n_skipped = 0    # ELF 아님 등으로 건너뜀
-    n_error = 0      # 분석 중 에러
+    n_input = 0
+    n_scanned = 0
+    n_skipped = 0
+    n_error = 0
+
+    # 이번 스캔에서 실제로 본 키. 여기 없는 기존 행은 stale 로 제거한다.
+    seen_keys = set()
 
     for path in candidates:
         if not os.path.isfile(path):
@@ -97,15 +163,22 @@ def scan_directory(
                 n_error += 1
             continue
 
-        # 파일 경로를 기본키로 덮어쓴다 — 같은 파일을 다시 스캔해도
-        # 행이 늘지 않는다.
-        records[path] = {"path": path, **result}
+        # 정규화된 절대경로를 기본키로 쓴다 — b / ./b / /abs/b 가 모두
+        # 같은 키가 되어 멱등성이 유지된다.
+        key = os.path.realpath(path)
+        records[key] = {"path": key, **result}
+        seen_keys.add(key)
         n_scanned += 1
 
-    # JSONL 전체를 다시 쓴다. 키로 관리하므로 재실행 결과가 동일하다.
-    with open(output_path, "w", encoding="utf-8") as f:
-        for path in sorted(records):
-            f.write(json.dumps(records[path], ensure_ascii=False) + "\n")
+    # 이번 디렉터리 스캔 대상 중 사라진 파일의 오래된 행 제거. 단
+    # 다른 디렉터리에서 적재한 행은 건드리지 않도록, 이번에 스캔한
+    # 디렉터리 아래 경로만 정리 대상으로 본다.
+    scan_root = os.path.realpath(directory)
+    for key in list(records):
+        if key.startswith(scan_root + os.sep) and key not in seen_keys:
+            del records[key]
+
+    _atomic_write(output_path, records)
 
     logger.info(
         "scan_directory: input=%d scanned=%d skipped=%d error=%d total_rows=%d",
