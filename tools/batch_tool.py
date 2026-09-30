@@ -28,6 +28,24 @@ from tools.elf_tool import analyze_elf
 logger = get_logger(__name__)
 
 
+def _safe_path(path: str) -> str:
+    """경로를 JSON(UTF-8)로 직렬화 가능한 표시용 문자열로 바꾼다.
+
+    파이썬은 비-UTF8 파일명 바이트를 surrogate 문자(\\udcff)로 보존하는데,
+    이 문자는 UTF-8 로 인코딩할 수 없어 그대로 JSON 에 쓰면 죽는다.
+    surrogateescape 로 원래 바이트를 복원한 뒤 backslashreplace 로 다시
+    문자열화해, 원본 바이트를 잃지 않으면서 직렬화 가능한 형태로 만든다.
+
+    Args:
+        path: 원본 경로(문자열, surrogate 포함 가능).
+
+    Returns:
+        surrogate 없는 표시용 경로 문자열.
+    """
+    raw = path.encode("utf-8", "surrogateescape")
+    return raw.decode("utf-8", "backslashreplace")
+
+
 def _looks_like_our_jsonl(path: str) -> bool:
     """기존 파일이 우리가 만든 JSONL 형식인지 확인한다.
 
@@ -106,7 +124,7 @@ def _atomic_write(output_path: str, records: dict) -> None:
 
     fd, tmp = tempfile.mkstemp(dir=out_dir, suffix=".tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "w", encoding="utf-8", errors="backslashreplace") as f:
             for key in sorted(records):
                 f.write(json.dumps(records[key], ensure_ascii=False) + "\n")
         os.chmod(tmp, mode)
@@ -165,37 +183,54 @@ def scan_directory(
             continue
         n_input += 1
 
-        result = analyze_elf(path)
+        # 파일 단위로 예외를 격리한다. 비-UTF8 파일명(악성 샘플에 흔함)
+        # 등으로 한 파일에서 문제가 나도 전체 스캔이 죽지 않도록 한다.
+        try:
+            result = analyze_elf(path)
+        except Exception:
+            logger.exception("analyze_elf raised for %r", path)
+            n_error += 1
+            continue
 
         if not result.get("ok"):
             code = result["error"]["code"]
-            if code in ("NOT_ELF", "FILE_NOT_FOUND"):
+            if code in ("NOT_ELF", "FILE_NOT_FOUND", "UNSUPPORTED_ELF_TYPE"):
                 n_skipped += 1
             else:
                 n_error += 1
             continue
 
         # 정규화된 절대경로를 기본키로 쓴다 — b / ./b / /abs/b 가 모두
-        # 같은 키가 되어 멱등성이 유지된다.
-        key = os.path.realpath(path)
+        # 같은 키가 되어 멱등성이 유지된다. 비-UTF8 파일명은 파이썬이
+        # surrogate 문자(\udcff)로 보존하는데, 이 문자는 JSON(UTF-8)으로
+        # 쓸 수 없어 그대로 두면 적재 단계에서 죽는다. surrogate 를
+        # 역슬래시 이스케이프로 바꿔 직렬화 가능한 표시용 문자열로 만든다.
+        key = _safe_path(os.path.realpath(path))
         records[key] = {"path": key, **result}
         seen_keys.add(key)
         n_scanned += 1
 
-    # 이번 스캔이 "볼 수 있었던" 파일의 행만 stale 판정 대상으로 삼는다.
-    # glob 은 하위 디렉터리를 탐색하지 않고 pattern 으로 대상을 좁히므로,
-    # (1) 바로 이 디렉터리 직속이고 (2) pattern 에 맞는 행만 후보다.
-    # 그렇지 않으면 다른 디렉터리나 다른 pattern 으로 적재한 행까지
-    # 지워 버린다.
-    scan_root = os.path.realpath(directory)
+    # stale 제거: 이번 스캔 디렉터리 직속이면서 이번 glob 이 매칭했을
+    # 규칙에 맞는 행 중, 이번에 ELF 로 적재되지 못한 것(삭제됐거나 더
+    # 이상 ELF 가 아님)을 지운다. 삭제된 파일은 glob 결과에 없으므로
+    # candidate_keys 만으로는 지울 수 없어, 직속 여부 + pattern 매칭을
+    # 다시 계산하되 glob 의 dotfile 규칙을 똑같이 따른다: pattern 이
+    # '.' 로 시작하지 않으면 dotfile(.으로 시작하는 이름)은 매칭에서
+    # 제외한다. 이렇게 해야 '.*' 로 적재한 dotfile 행이 '*' 스캔에
+    # 지워지지 않는다.
+    scan_root = _safe_path(os.path.realpath(directory))
+    pattern_is_hidden = os.path.basename(pattern).startswith(".")
     for key in list(records):
         if key in seen_keys:
             continue
         if os.path.dirname(key) != scan_root:
             continue
-        if not fnmatch.fnmatch(os.path.basename(key), pattern):
+        base = os.path.basename(key)
+        if base.startswith(".") and not pattern_is_hidden:
+            # glob 은 이 파일을 애초에 못 봤으므로 stale 대상 아님.
             continue
-        # 이번 스캔 대상이었는데 사라진 파일 → stale 이므로 제거.
+        if not fnmatch.fnmatch(base, pattern):
+            continue
         del records[key]
 
     _atomic_write(output_path, records)
