@@ -36,9 +36,7 @@ _DISABLED = re.compile(
     r"\bnon[\s_-]?|\bnot\b|\bfalse\b)"
 )
 
-# RELRO 수준 표현.
-_RELRO_FULL = re.compile(r"\bfull\b")
-_RELRO_PARTIAL = re.compile(r"\bpartial\b")
+# RELRO 수준은 _relro_level 에서 별칭 주변 구간을 잘라 판정한다.
 
 # 각 보호기법이 공격에 주는 제약 설명. 난이도 근거를 사람이 읽을 수
 # 있게 덧붙이는 용도.
@@ -96,8 +94,10 @@ def _is_enabled(text: str, key: str) -> bool:
         if re.search(r"(no|non|not|without)[\s_:=-]*$", before):
             continue
         # 뒤쪽에 disabled/off/no 등이 오면 꺼짐. 단 다른 보호기법의
-        # 상태를 삼키지 않도록 콤마 이전까지만 본다.
-        after_segment = re.split(r"[,;|]", after)[0]
+        # 상태를 삼키지 않도록 구분자(콤마·세미콜론·파이프·줄바꿈) 이전
+        # 까지만 본다. 줄바꿈을 넣지 않으면 다음 줄의 "No" 가 이 줄의
+        # 상태로 잘못 붙는다.
+        after_segment = re.split(r"[,;|\n]", after)[0]
         if _DISABLED.search(after_segment):
             continue
         return True
@@ -107,17 +107,44 @@ def _is_enabled(text: str, key: str) -> bool:
 def _relro_level(text: str) -> str:
     """RELRO 수준을 판정한다.
 
+    relro 별칭이 등장한 위치 주변 구간(그 구분자 안)에서만 full/partial/
+    none 을 찾는다. 문자열 전체에서 full/partial 을 찾으면 "Canary: full,
+    RELRO: partial" 같은 입력에서 다른 항목의 full 을 RELRO 로 잘못
+    가져온다. 별칭 앞뒤의 부정어(no/off/disabled/none)도 이 구간에서
+    확인해 "RELRO none", "RELRO: disabled" 를 none 으로 판정한다.
+
+    Args:
+        text: 소문자로 바꾼 보호기법 설명 문자열.
+
     Returns:
         "full", "partial", "none" 중 하나.
     """
-    if not _find_alias(text, _ALIASES["relro"]):
+    spans = _find_alias(text, _ALIASES["relro"])
+    if not spans:
         return "none"
-    # "no relro" 형태면 none.
-    if re.search(r"(no|non|not)[\s_:=-]*relro", text):
+
+    start, end = spans[0]
+    # relro 별칭이 속한 구간만 잘라낸다(앞뒤 구분자 사이).
+    # 앞쪽 구분자 이후부터.
+    seg_start = max(
+        (text.rfind(sep, 0, start) for sep in [",", ";", "|", "\n"]),
+        default=-1,
+    )
+    seg_start = seg_start + 1 if seg_start >= 0 else 0
+    # 뒤쪽 구분자 이전까지.
+    seg_end_candidates = [
+        text.find(sep, end) for sep in [",", ";", "|", "\n"]
+    ]
+    seg_end_candidates = [p for p in seg_end_candidates if p >= 0]
+    seg_end = min(seg_end_candidates) if seg_end_candidates else len(text)
+    segment = text[seg_start:seg_end]
+
+    # 이 구간 안에 부정어가 있으면 none.
+    if re.search(r"\b(no|non|not|disabled|disable|off|none)\b", segment):
         return "none"
-    if _RELRO_FULL.search(text):
+    if re.search(r"\bfull\b", segment):
         return "full"
-    if _RELRO_PARTIAL.search(text):
+    if re.search(r"\bpartial\b", segment):
         return "partial"
     # relro 는 있다고 했으나 수준 표기가 없으면 보수적으로 partial.
     return "partial"
@@ -162,7 +189,8 @@ def get_exploit_mitigation_info(protection: str, target_vuln: str) -> dict:
             theory[key] = _THEORY[key]
 
     # RELRO 는 수준별로 가중치를 다르게 준다. Partial 은 .got.plt 가
-    # 여전히 쓰기 가능하므로 Full 의 절반만 인정한다.
+    # 여전히 쓰기 가능해 온전한 보호로 보기 어려우므로, config 에서
+    # relro_partial 가중치를 0 으로 두었다(Full 만 점수를 준다).
     relro = _relro_level(text)
     if relro == "full":
         enabled.append("relro:full")
