@@ -53,6 +53,9 @@ def get_logger(name: str) -> logging.Logger:
         )
         handler.setFormatter(fmt)
         logger.addHandler(handler)
+        # 상위(root) 로거로 전파하지 않는다. MCP 서버가 root 에 핸들러를
+        # 붙이면 같은 로그가 두 번 찍히기 때문이다.
+        logger.propagate = False
     level = os.environ.get("LOG_LEVEL", "INFO").upper()
     # 잘못된 레벨 값이 들어와도 서버가 죽지 않도록 유효한 값만 허용하고,
     # 그 외에는 INFO 로 폴백한다.
