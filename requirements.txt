@@ -1,2 +1,9 @@
-mcp
-requests
+# MCP SDK. 2.x 에서 FastMCP -> MCPServer 로 API 가 바뀌었다.
+# 서버 코드는 2.x 기준으로 작성했고 구버전 폴백도 두었다.
+mcp>=2.0,<3.0
+# ELF 파싱(순수 파이썬 checksec 구현). 외부 readelf 불필요.
+pyelftools>=0.29
+# 설정 파일 로딩.
+PyYAML>=6.0
+# Ollama 등 HTTP 호출용(선택 기능).
+requests>=2.28
