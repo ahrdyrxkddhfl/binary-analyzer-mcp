@@ -16,6 +16,7 @@ DE 관점 포인트:
 - 관측: 입력 대비 처리/스킵/에러 건수를 로그로 남긴다.
 """
 
+import fnmatch
 import glob
 import json
 import os
@@ -25,10 +26,6 @@ from common import make_error, get_logger
 from tools.elf_tool import analyze_elf
 
 logger = get_logger(__name__)
-
-# 우리 JSONL 임을 식별하는 마커. 모든 행이 dict 이고 "path" 키를 가진다.
-# 기존 파일이 이 형식이 아니면 사용자가 지정한 다른 파일일 수 있으므로
-# 덮어쓰지 않는다.
 
 
 def _looks_like_our_jsonl(path: str) -> bool:
@@ -76,7 +73,9 @@ def _load_existing(output_path: str) -> dict:
             try:
                 rec = json.loads(line)
                 records[rec["path"]] = rec
-            except (json.JSONDecodeError, KeyError):
+            except (json.JSONDecodeError, KeyError, TypeError):
+                # TypeError: 줄이 dict 가 아닌 JSON([1] 등)이라 rec["path"]
+                # 인덱싱이 실패하는 경우. 손상된 줄은 건너뛴다.
                 logger.warning("skip malformed line in %s", output_path)
     return records
 
@@ -86,19 +85,32 @@ def _atomic_write(output_path: str, records: dict) -> None:
 
     같은 디렉터리에 임시 파일로 먼저 쓴 뒤 os.replace 로 교체한다.
     os.replace 는 같은 파일시스템에서 원자적이라, 쓰는 도중 죽어도
-    기존 output_path 는 온전히 남는다.
+    기존 output_path 는 온전히 남는다. output_path 가 심링크면 그 대상
+    실제 경로에 쓴다(심링크 자체를 일반 파일로 갈아치우지 않는다).
+    기존 파일이 있으면 그 권한을 임시 파일에 물려줘, mkstemp 기본
+    권한(0600)으로 바뀌지 않게 한다.
 
     Args:
         output_path: 최종 결과 경로.
         records: 정규화 경로를 키로 한 레코드 딕셔너리.
     """
-    out_dir = os.path.dirname(os.path.abspath(output_path))
+    # 심링크면 대상 실제 경로로 해석해 원본을 보존한다.
+    real_out = os.path.realpath(output_path)
+    out_dir = os.path.dirname(os.path.abspath(real_out))
+
+    # 기존 파일 권한 보존(없으면 일반적인 0644).
+    try:
+        mode = os.stat(real_out).st_mode & 0o777
+    except OSError:
+        mode = 0o644
+
     fd, tmp = tempfile.mkstemp(dir=out_dir, suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             for key in sorted(records):
                 f.write(json.dumps(records[key], ensure_ascii=False) + "\n")
-        os.replace(tmp, output_path)
+        os.chmod(tmp, mode)
+        os.replace(tmp, real_out)
     except Exception:
         if os.path.exists(tmp):
             os.remove(tmp)
@@ -170,13 +182,21 @@ def scan_directory(
         seen_keys.add(key)
         n_scanned += 1
 
-    # 이번 디렉터리 스캔 대상 중 사라진 파일의 오래된 행 제거. 단
-    # 다른 디렉터리에서 적재한 행은 건드리지 않도록, 이번에 스캔한
-    # 디렉터리 아래 경로만 정리 대상으로 본다.
+    # 이번 스캔이 "볼 수 있었던" 파일의 행만 stale 판정 대상으로 삼는다.
+    # glob 은 하위 디렉터리를 탐색하지 않고 pattern 으로 대상을 좁히므로,
+    # (1) 바로 이 디렉터리 직속이고 (2) pattern 에 맞는 행만 후보다.
+    # 그렇지 않으면 다른 디렉터리나 다른 pattern 으로 적재한 행까지
+    # 지워 버린다.
     scan_root = os.path.realpath(directory)
     for key in list(records):
-        if key.startswith(scan_root + os.sep) and key not in seen_keys:
-            del records[key]
+        if key in seen_keys:
+            continue
+        if os.path.dirname(key) != scan_root:
+            continue
+        if not fnmatch.fnmatch(os.path.basename(key), pattern):
+            continue
+        # 이번 스캔 대상이었는데 사라진 파일 → stale 이므로 제거.
+        del records[key]
 
     _atomic_write(output_path, records)
 
